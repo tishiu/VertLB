@@ -2,10 +2,14 @@ package io.vertilb.proxy;
 
 import io.vertilb.engine.RequestContext;
 import io.vertilb.pool.Upstream;
+import io.vertx.core.Future;
 
 /**
- * HTTP proxy component responsible for forwarding a request to a selected upstream and streaming
- * the response back to the client.
+ * HTTP proxy component responsible for forwarding a request to a selected upstream
+ * and streaming the response back to the client.
+ *
+ * This class is intentionally kept as an async boundary.
+ * Full Vert.x HttpClient forwarding will be implemented later.
  */
 public class HttpProxy {
     /**
@@ -13,9 +17,9 @@ public class HttpProxy {
      *
      * @param ctx request context
      * @param upstream selected upstream
+     * @return future completed when forwarding finishes
      */
-    public void forward(RequestContext ctx, Upstream upstream) {
-        // TODO
-        throw new UnsupportedOperationException("TODO");
+    public Future<Void> forward(RequestContext ctx, Upstream upstream) {
+        return Future.failedFuture(new UnsupportedOperationException("HttpProxy implementation TODO"));
     }
 }

@@ -1,59 +1,95 @@
 package io.vertilb.pool;
 
-import io.vertilb.engine.RequestContext;
-import io.vertilb.pool.strategy.BalancingStrategy;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
 
+import io.vertilb.engine.RequestContext;
+import io.vertilb.pool.strategy.BalancingStrategy;
+
 /**
- * Runtime pool that owns upstreams and delegates healthy-upstream selection to a balancing strategy.
+ * Runtime pool that owns upstreams and delegates selectable-upstream selection
+ * to a balancing strategy.
  */
 public class UpstreamPool {
-    private String name;
-    private List<Upstream> upstreams;
-    private BalancingStrategy strategy;
+    private final String name;
+    private final List<Upstream> upstreams;
+    private final BalancingStrategy strategy;
 
-    /**
-     * Creates a runtime upstream pool.
-     *
-     * @param name pool name referenced by listeners
-     * @param upstreams runtime upstreams in the pool
-     * @param strategy balancing strategy used by this pool
-     */
     public UpstreamPool(String name, List<Upstream> upstreams, BalancingStrategy strategy) {
-        // TODO
-        throw new UnsupportedOperationException("TODO");
+        this.name = Objects.requireNonNull(name, "name must not be null");
+        this.upstreams = List.copyOf(Objects.requireNonNull(upstreams, "upstreams must not be null"));
+        this.strategy = Objects.requireNonNull(strategy, "strategy must not be null");
     }
 
     /**
-     * Selects one healthy upstream for a request.
+     * Selects one selectable upstream for a request.
      *
      * @param ctx request context
      * @return selected upstream when one is available
      */
     public Optional<Upstream> selectUpstream(RequestContext ctx) {
-        // TODO
-        throw new UnsupportedOperationException("TODO");
+        List<Upstream> selectable = getHealthyUpstreams();
+
+        if (selectable.isEmpty()) {
+            return Optional.empty();
+        }
+
+        return Optional.ofNullable(strategy.select(selectable, ctx));
     }
 
     /**
-     * Returns only upstreams that are currently selectable.
+     * The method name is kept for scaffold compatibility.
+     * Actual behavior: returns selectable upstreams.
      *
-     * @return healthy upstream list
+     * UNKNOWN + HEALTHY pass.
+     * UNHEALTHY is excluded.
      */
     public List<Upstream> getHealthyUpstreams() {
-        // TODO
-        throw new UnsupportedOperationException("TODO");
+        List<Upstream> result = new ArrayList<>();
+
+        for (Upstream upstream : upstreams) {
+            if (upstream.isSelectable()) {
+                result.add(upstream);
+            }
+        }
+
+        return result;
     }
 
     /**
-     * Updates the health status of one upstream after a probe threshold transition.
+     * Updates the health status of one upstream.
      *
      * @param upstreamId upstream identifier to update
      * @param status new health status
      */
     public void updateHealthStatus(String upstreamId, HealthStatus status) {
-        // TODO
-        throw new UnsupportedOperationException("TODO");
+        for (Upstream upstream : upstreams) {
+            if (upstream.id().equals(upstreamId)) {
+                upstream.setHealthStatus(status);
+                return;
+            }
+        }
+    }
+
+    /**
+     * Completion hook after one selected attempt finishes.
+     * CoreEngine calls this instead of touching strategy directly.
+     */
+    public void onRequestCompleted(Upstream upstream, RequestContext ctx) {
+        strategy.onRequestCompleted(upstream, ctx);
+    }
+
+    public String name() {
+        return name;
+    }
+
+    public List<Upstream> upstreams() {
+        return upstreams;
+    }
+
+    public BalancingStrategy strategy() {
+        return strategy;
     }
 }

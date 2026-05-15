@@ -1,24 +1,29 @@
 package io.vertilb.engine;
 
 import io.vertx.core.http.HttpServerRequest;
-import io.vertilb.pool.Upstream;
+import io.vertx.core.http.HttpServerResponse;
 
 /**
  * Mutable state bag that follows one proxied client request through selection, retry, and logging.
  */
 public class RequestContext {
-    public String id;
-    public String poolName;
-    public long startTime;
-    public int attempt;
-    public HttpServerRequest clientRequest;
-    public Upstream selectedUpstream;
+    public final String poolName;
+    public final HttpServerRequest clientRequest;
+    public final long startTime;
+
+    public String selectedUpstreamId;
+    public int attemptCount;
+    public int responseStatusCode;
     public long durationMs;
+    public Throwable lastError;
 
     /**
      * Creates an empty request context for framework and test construction.
      */
     public RequestContext() {
+        this.poolName = null;
+        this.clientRequest = null;
+        this.startTime = 0;
     }
 
     /**
@@ -28,7 +33,12 @@ public class RequestContext {
      * @param clientRequest incoming Vert.x request
      */
     public RequestContext(String poolName, HttpServerRequest clientRequest) {
-        // TODO
-        throw new UnsupportedOperationException("TODO");
+        this.poolName = poolName;
+        this.clientRequest = clientRequest;
+        this.startTime = System.currentTimeMillis();
+    }
+
+    public HttpServerResponse response() {
+        return clientRequest.response();
     }
 }
