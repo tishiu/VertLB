@@ -1,5 +1,7 @@
 package io.vertilb.pool.strategy;
 
+import java.util.Locale;
+
 /**
  * Factory for creating supported upstream balancing strategies from configuration values.
  */
@@ -7,14 +9,17 @@ public final class StrategyFactory {
     private StrategyFactory() {
     }
 
-    /**
-     * Creates a balancing strategy by name.
-     *
-     * @param strategy configured strategy name
-     * @return matching balancing strategy
-     */
     public static BalancingStrategy create(String strategy) {
-        // TODO
-        throw new UnsupportedOperationException("TODO");
+        String normalized = strategy == null || strategy.isBlank()
+            ? "round-robin"
+            : strategy.toLowerCase(Locale.ROOT);
+
+        return switch (normalized) {
+            case "round-robin" -> new RoundRobinStrategy();
+            case "random" -> new RandomStrategy();
+            case "ip-hash" -> new IpHashStrategy();
+            case "least-connections" -> new LeastConnectionsStrategy();
+            default -> throw new IllegalArgumentException("Unknown strategy: " + strategy);
+        };
     }
 }

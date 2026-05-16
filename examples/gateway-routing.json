@@ -1,0 +1,88 @@
+{
+  "listeners": [
+    {
+      "host": "0.0.0.0",
+      "port": 8080
+    }
+  ],
+  "routes": [
+    {
+      "id": "users-route",
+      "pathPrefix": "/api/users",
+      "methods": ["GET", "POST", "PUT", "DELETE"],
+      "poolName": "user-service",
+      "stripPrefix": "/api"
+    },
+    {
+      "id": "orders-route",
+      "pathPrefix": "/api/orders",
+      "methods": ["GET", "POST"],
+      "poolName": "order-service",
+      "stripPrefix": "/api"
+    }
+  ],
+  "pools": [
+    {
+      "name": "user-service",
+      "strategy": "round-robin",
+      "healthCheck": {
+        "enabled": true,
+        "intervalMs": 5000,
+        "timeoutMs": 1000,
+        "path": "/health",
+        "method": "GET",
+        "expectedStatuses": [200],
+        "successThreshold": 1,
+        "failureThreshold": 1
+      },
+      "upstreams": [
+        {
+          "id": "user-1",
+          "host": "localhost",
+          "port": 9001,
+          "protocol": "http",
+          "weight": 1
+        }
+      ]
+    },
+    {
+      "name": "order-service",
+      "strategy": "round-robin",
+      "healthCheck": {
+        "enabled": true,
+        "intervalMs": 5000,
+        "timeoutMs": 1000,
+        "path": "/health",
+        "method": "GET",
+        "expectedStatuses": [200],
+        "successThreshold": 1,
+        "failureThreshold": 1
+      },
+      "upstreams": [
+        {
+          "id": "order-1",
+          "host": "localhost",
+          "port": 9011,
+          "protocol": "http",
+          "weight": 1
+        }
+      ]
+    }
+  ],
+  "defaults": {
+    "timeout": 30000,
+    "retries": {
+      "maxAttempts": 3,
+      "retryableStatuses": [502, 503, 504],
+      "backoffMs": 100
+    },
+    "logging": {
+      "level": "INFO"
+    }
+  },
+  "metrics": {
+    "enabled": true,
+    "port": 9100,
+    "path": "/metrics"
+  }
+}

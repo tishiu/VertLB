@@ -5,23 +5,21 @@ import io.vertx.core.Promise;
 import io.vertilb.config.ListenerConfig;
 import io.vertilb.engine.CoreEngine;
 import io.vertilb.engine.RequestContext;
+import io.vertilb.gateway.GatewayRouter;
+import io.vertilb.gateway.RouteDecision;
 
 /**
- * Vert.x HTTP listener that accepts client requests, creates request contexts,
- * and invokes the core engine.
+ * Vert.x HTTP listener that accepts client requests, resolves gateway routes,
+ * creates request contexts, and invokes the core engine.
  */
 public class ListenerVerticle extends AbstractVerticle {
     private final ListenerConfig config;
+    private final GatewayRouter router;
     private final CoreEngine engine;
 
-    /**
-     * Creates one HTTP listener bound to one configured upstream pool.
-     *
-     * @param config listener config containing host, port, and poolName
-     * @param engine core request engine
-     */
-    public ListenerVerticle(ListenerConfig config, CoreEngine engine) {
+    public ListenerVerticle(ListenerConfig config, GatewayRouter router, CoreEngine engine) {
         this.config = config;
+        this.router = router;
         this.engine = engine;
     }
 
@@ -33,7 +31,22 @@ public class ListenerVerticle extends AbstractVerticle {
 
         vertx.createHttpServer()
             .requestHandler(request -> {
-                RequestContext ctx = new RequestContext(config.poolName, request);
+                RouteDecision decision;
+
+                try {
+                    decision = router.resolve(request);
+                } catch (Exception routeError) {
+                    if (!request.response().ended()) {
+                        request.response()
+                            .setStatusCode(404)
+                            .putHeader("Content-Type", "text/plain")
+                            .end("No route matched");
+                    }
+                    return;
+                }
+
+                RequestContext ctx = new RequestContext(decision.poolName(), request);
+                ctx.rewrittenUri = decision.rewrittenUri();
 
                 engine.handleRequest(ctx)
                     .onFailure(error -> {

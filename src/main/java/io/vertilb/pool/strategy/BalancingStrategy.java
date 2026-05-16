@@ -5,25 +5,24 @@ import io.vertilb.pool.Upstream;
 import java.util.List;
 
 /**
- * Selects an upstream from the healthy members of a pool and receives completion callbacks.
+ * Selects an upstream from the selectable members of a pool and receives completion callbacks.
  */
 public interface BalancingStrategy {
     /**
-     * Selects one upstream from the supplied healthy upstreams.
+     * Selects one upstream from the supplied selectable upstreams.
      *
-     * @param healthyUpstreams upstreams eligible for selection
+     * @param selectableUpstreams upstreams already filtered by UpstreamPool
      * @param ctx request context
-     * @return selected upstream
+     * @return selected upstream, or null if none can be selected
      */
-    Upstream select(List<Upstream> healthyUpstreams, RequestContext ctx);
+    Upstream select(List<Upstream> selectableUpstreams, RequestContext ctx);
 
     /**
-     * Called after a request completes, whether successful or retryable failure.
+     * Called after a selected request attempt completes.
      *
      * @param upstream selected upstream
      * @param ctx request context
      */
     default void onRequestCompleted(Upstream upstream, RequestContext ctx) {
-        // TODO
     }
 }

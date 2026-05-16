@@ -14,8 +14,10 @@ public class HealthState {
      * @return true when the success threshold is reached
      */
     public boolean recordSuccess(int successThreshold) {
-        // TODO
-        throw new UnsupportedOperationException("TODO");
+        consecutiveSuccesses++;
+        consecutiveFailures = 0;
+
+        return consecutiveSuccesses >= Math.max(1, successThreshold);
     }
 
     /**
@@ -25,7 +27,17 @@ public class HealthState {
      * @return true when the failure threshold is reached
      */
     public boolean recordFailure(int failureThreshold) {
-        // TODO
-        throw new UnsupportedOperationException("TODO");
+        consecutiveFailures++;
+        consecutiveSuccesses = 0;
+
+        return consecutiveFailures >= Math.max(1, failureThreshold);
+    }
+
+    public int consecutiveSuccesses() {
+        return consecutiveSuccesses;
+    }
+
+    public int consecutiveFailures() {
+        return consecutiveFailures;
     }
 }

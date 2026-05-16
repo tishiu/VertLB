@@ -1,7 +1,9 @@
 package io.vertilb.engine;
 
-import io.vertx.core.Future;
-import io.vertx.core.Promise;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+
 import io.vertilb.engine.error.NoHealthyUpstreamsException;
 import io.vertilb.engine.error.UpstreamTimeoutException;
 import io.vertilb.observability.AppLogger;
@@ -9,10 +11,8 @@ import io.vertilb.observability.MetricsCollector;
 import io.vertilb.pool.Upstream;
 import io.vertilb.pool.UpstreamPool;
 import io.vertilb.proxy.HttpProxy;
-
-import java.util.Map;
-import java.util.Optional;
-import java.util.Set;
+import io.vertx.core.Future;
+import io.vertx.core.Promise;
 
 /**
  * Core request engine that selects upstreams, drives retry attempts,
@@ -184,6 +184,7 @@ public class CoreEngine {
             }
         } catch (Exception ignored) {
             // Observability must not break request handling.
+            logger.logError("Failed to log or record metrics for request", ignored);
         }
     }
 }

@@ -4,13 +4,15 @@ import io.vertx.core.http.HttpServerRequest;
 import io.vertx.core.http.HttpServerResponse;
 
 /**
- * Mutable state bag that follows one proxied client request through selection, retry, and logging.
+ * Mutable request-scoped state that follows one proxied client request
+ * through upstream selection, retry, forwarding, and observability.
  */
 public class RequestContext {
     public final String poolName;
     public final HttpServerRequest clientRequest;
     public final long startTime;
 
+    public String rewrittenUri;
     public String selectedUpstreamId;
     public int attemptCount;
     public int responseStatusCode;
@@ -23,7 +25,7 @@ public class RequestContext {
     public RequestContext() {
         this.poolName = null;
         this.clientRequest = null;
-        this.startTime = 0;
+        this.startTime = System.currentTimeMillis();
     }
 
     /**
@@ -40,5 +42,9 @@ public class RequestContext {
 
     public HttpServerResponse response() {
         return clientRequest.response();
+    }
+
+    public String outboundUri() {
+        return rewrittenUri != null ? rewrittenUri : clientRequest.uri();
     }
 }

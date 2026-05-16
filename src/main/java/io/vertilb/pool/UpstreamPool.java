@@ -1,12 +1,13 @@
 package io.vertilb.pool;
 
+import io.vertilb.engine.RequestContext;
+import io.vertilb.pool.strategy.BalancingStrategy;
+import io.vertilb.pool.strategy.LeastConnectionsStrategy;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
-
-import io.vertilb.engine.RequestContext;
-import io.vertilb.pool.strategy.BalancingStrategy;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Runtime pool that owns upstreams and delegates selectable-upstream selection
@@ -21,6 +22,19 @@ public class UpstreamPool {
         this.name = Objects.requireNonNull(name, "name must not be null");
         this.upstreams = List.copyOf(Objects.requireNonNull(upstreams, "upstreams must not be null"));
         this.strategy = Objects.requireNonNull(strategy, "strategy must not be null");
+
+        initializeStrategyMetadata();
+    }
+
+    private void initializeStrategyMetadata() {
+        if (strategy instanceof LeastConnectionsStrategy) {
+            for (Upstream upstream : upstreams) {
+                upstream.metadata().putIfAbsent(
+                    LeastConnectionsStrategy.ACTIVE_CONNECTIONS_KEY,
+                    new AtomicInteger(0)
+                );
+            }
+        }
     }
 
     /**
@@ -36,7 +50,8 @@ public class UpstreamPool {
             return Optional.empty();
         }
 
-        return Optional.ofNullable(strategy.select(selectable, ctx));
+        Upstream selected = strategy.select(selectable, ctx);
+        return Optional.ofNullable(selected);
     }
 
     /**
