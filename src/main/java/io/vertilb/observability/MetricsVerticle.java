@@ -66,6 +66,7 @@ public class MetricsVerticle extends AbstractVerticle {
             .put("upstreamRequestCounts", longMapToJson(snapshot.upstreamRequestCounts))
             .put("errorCounts", longMapToJson(snapshot.errorCounts))
             .put("latencySamples", new JsonArray(snapshot.latencySamples))
+            .put("latencySummary", latencySummaryToJson(snapshot.latencySummary))
             .put("poolStats", poolStatsToJson(snapshot.poolStats));
     }
 
@@ -95,5 +96,16 @@ public class MetricsVerticle extends AbstractVerticle {
         }
 
         return json;
+    }
+
+    private JsonObject latencySummaryToJson(MetricsCollector.LatencySummary summary) {
+        return new JsonObject()
+            .put("count", summary.count)
+            .put("min", summary.min)
+            .put("max", summary.max)
+            .put("avg", summary.avg)
+            .put("p50", summary.p50)
+            .put("p95", summary.p95)
+            .put("p99", summary.p99);
     }
 }

@@ -8,7 +8,7 @@ import java.util.List;
 import org.junit.jupiter.api.Test;
 
 /**
- * Test skeleton for round-robin strategy ordering and wraparound behavior.
+ * Tests round-robin strategy ordering and wraparound behavior.
  */
 class RoundRobinStrategyTest {
     @Test
@@ -30,7 +30,7 @@ class RoundRobinStrategyTest {
     }
 
     @Test
-    void wrapsAroundAfterLastHealthyUpstream() {
+    void wrapsAroundAfterLastSelectableUpstream() {
         RoundRobinStrategy strategy = new RoundRobinStrategy();
         List<Upstream> upstreams = List.of(upstream("one"), upstream("two"));
 

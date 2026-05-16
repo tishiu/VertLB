@@ -12,22 +12,37 @@ import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 
 /**
- * Test skeleton for upstream pool selection, health filtering, and health updates.
+ * Tests upstream pool selectable filtering, health updates, and strategy completion hooks.
  */
 class UpstreamPoolTest {
     @Test
-    void selectsHealthyUpstreamWhenAvailable() {
-        // TODO
+    void selectsSelectableUpstreamWhenAvailable() {
+        Upstream first = upstream("first");
+        Upstream second = upstream("second");
+        UpstreamPool pool = new UpstreamPool("pool", List.of(first, second), new RoundRobinStrategy());
+
+        assertEquals(first, pool.selectUpstream(null).orElseThrow());
     }
 
     @Test
-    void returnsEmptyWhenNoHealthyUpstreamsExist() {
-        // TODO
+    void returnsEmptyWhenNoSelectableUpstreamsExist() {
+        Upstream first = upstream("first");
+        Upstream second = upstream("second");
+        first.setHealthStatus(HealthStatus.UNHEALTHY);
+        second.setHealthStatus(HealthStatus.UNHEALTHY);
+        UpstreamPool pool = new UpstreamPool("pool", List.of(first, second), new RoundRobinStrategy());
+
+        assertTrue(pool.selectUpstream(null).isEmpty());
     }
 
     @Test
     void updatesUpstreamHealthStatusById() {
-        // TODO
+        Upstream upstream = upstream("first");
+        UpstreamPool pool = new UpstreamPool("pool", List.of(upstream), new RoundRobinStrategy());
+
+        pool.updateHealthStatus("first", HealthStatus.HEALTHY);
+
+        assertEquals(HealthStatus.HEALTHY, upstream.healthStatus());
     }
 
     @Test

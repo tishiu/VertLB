@@ -14,8 +14,11 @@ import io.vertilb.pool.HealthStatus;
 import io.vertilb.pool.Upstream;
 import io.vertilb.pool.UpstreamPool;
 
+import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Vert.x verticle for immediate and periodic upstream health probes.
@@ -29,6 +32,8 @@ public class HealthChecker extends AbstractVerticle {
 
     private HttpClient httpClient;
     private long timerId = -1;
+    private boolean probeCycleInProgress;
+    private boolean stopped;
 
     public HealthChecker(UpstreamPool pool,
                          HealthCheckConfig config,
@@ -47,6 +52,7 @@ public class HealthChecker extends AbstractVerticle {
             return;
         }
 
+        stopped = false;
         this.httpClient = vertx.createHttpClient(new HttpClientOptions()
             .setKeepAlive(true)
             .setTcpNoDelay(true)
@@ -57,57 +63,88 @@ public class HealthChecker extends AbstractVerticle {
         }
 
         runProbes()
-            .onSuccess(ignored -> {
-                schedulePeriodicProbes();
-                startPromise.complete();
-            })
-            .onFailure(error -> {
-                schedulePeriodicProbes();
+            .onComplete(ignored -> {
+                if (!stopped) {
+                    schedulePeriodicProbes();
+                }
+
                 startPromise.complete();
             });
     }
 
     @Override
     public void stop() {
+        stopped = true;
+        probeCycleInProgress = false;
+
         if (timerId >= 0) {
             vertx.cancelTimer(timerId);
+            timerId = -1;
         }
 
         if (httpClient != null) {
             httpClient.close();
+            httpClient = null;
         }
     }
 
     private void schedulePeriodicProbes() {
         long intervalMs = intervalMs();
 
-        timerId = vertx.setPeriodic(intervalMs, ignored -> {
-            runProbes()
-                .onFailure(error -> logger.logError(
-                    "Health probe cycle failed for pool=" + pool.name(),
-                    error
-                ));
-        });
+        timerId = vertx.setPeriodic(intervalMs, ignored -> runScheduledProbeCycle());
+    }
+
+    private void runScheduledProbeCycle() {
+        if (stopped || probeCycleInProgress) {
+            return;
+        }
+
+        probeCycleInProgress = true;
+
+        runProbes()
+            .onComplete(result -> {
+                probeCycleInProgress = false;
+
+                if (result.failed()) {
+                    logger.logError(
+                        "Health probe cycle failed for pool=" + pool.name(),
+                        result.cause()
+                    );
+                }
+            });
     }
 
     private Future<Void> runProbes() {
         Promise<Void> allDone = Promise.promise();
+        List<Upstream> upstreams = pool.upstreams();
 
-        if (pool.upstreams().isEmpty()) {
-            updatePoolStats();
-            allDone.complete();
+        if (stopped) {
+            allDone.tryComplete();
             return allDone.future();
         }
 
-        int[] remaining = {pool.upstreams().size()};
+        if (upstreams.isEmpty()) {
+            updatePoolStats();
+            allDone.tryComplete();
+            return allDone.future();
+        }
 
-        for (Upstream upstream : pool.upstreams()) {
-            probeOne(upstream).onComplete(ignored -> {
-                remaining[0]--;
+        AtomicInteger remaining = new AtomicInteger(upstreams.size());
 
-                if (remaining[0] == 0) {
+        for (Upstream upstream : upstreams) {
+            Future<Void> probe;
+
+            try {
+                probe = probeOne(upstream);
+            } catch (RuntimeException error) {
+                handleFailure(upstream, error);
+                probe = Future.succeededFuture();
+            }
+
+            probe.onComplete(ignored -> {
+                if (remaining.decrementAndGet() == 0) {
                     updatePoolStats();
-                    allDone.complete();
+                    allDone.tryComplete();
                 }
             });
         }
@@ -117,6 +154,15 @@ public class HealthChecker extends AbstractVerticle {
 
     private Future<Void> probeOne(Upstream upstream) {
         Promise<Void> promise = Promise.promise();
+
+        if (httpClient == null) {
+            if (!stopped) {
+                handleFailure(upstream, new IllegalStateException("Health checker HTTP client is not started"));
+            }
+
+            promise.tryComplete();
+            return promise.future();
+        }
 
         RequestOptions options = new RequestOptions()
             .setMethod(method())
@@ -129,7 +175,7 @@ public class HealthChecker extends AbstractVerticle {
         httpClient.request(options)
             .onFailure(error -> {
                 handleFailure(upstream, error);
-                promise.complete();
+                promise.tryComplete();
             })
             .onSuccess(request -> {
                 request.putHeader("Host", upstream.host() + ":" + upstream.port());
@@ -137,20 +183,26 @@ public class HealthChecker extends AbstractVerticle {
                 request.send()
                     .onFailure(error -> {
                         handleFailure(upstream, error);
-                        promise.complete();
+                        promise.tryComplete();
                     })
                     .onSuccess(response -> {
-                        if (isExpectedStatus(response.statusCode())) {
-                            handleSuccess(upstream);
-                        } else {
-                            handleFailure(
-                                upstream,
-                                new IllegalStateException("Unexpected health status: " + response.statusCode())
-                            );
-                        }
+                        boolean expectedStatus = isExpectedStatus(response.statusCode());
 
                         response.body()
-                            .onComplete(ignored -> promise.complete());
+                            .onComplete(body -> {
+                                if (body.failed()) {
+                                    handleFailure(upstream, body.cause());
+                                } else if (expectedStatus) {
+                                    handleSuccess(upstream);
+                                } else {
+                                    handleFailure(
+                                        upstream,
+                                        new IllegalStateException("Unexpected health status: " + response.statusCode())
+                                    );
+                                }
+
+                                promise.tryComplete();
+                            });
                     });
             });
 
@@ -158,6 +210,10 @@ public class HealthChecker extends AbstractVerticle {
     }
 
     private void handleSuccess(Upstream upstream) {
+        if (stopped) {
+            return;
+        }
+
         HealthState state = states.get(upstream.id());
 
         if (state == null) {
@@ -176,6 +232,10 @@ public class HealthChecker extends AbstractVerticle {
     }
 
     private void handleFailure(Upstream upstream, Throwable error) {
+        if (stopped) {
+            return;
+        }
+
         HealthState state = states.get(upstream.id());
 
         if (state == null) {
@@ -248,7 +308,7 @@ public class HealthChecker extends AbstractVerticle {
             return HttpMethod.GET;
         }
 
-        return HttpMethod.valueOf(config.method.toUpperCase());
+        return HttpMethod.valueOf(config.method.toUpperCase(Locale.ROOT));
     }
 
     private int successThreshold() {

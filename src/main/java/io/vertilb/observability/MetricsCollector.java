@@ -1,6 +1,7 @@
 package io.vertilb.observability;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Queue;
@@ -63,11 +64,14 @@ public class MetricsCollector {
      * Full immutable/copy snapshot for MetricsVerticle.
      */
     public MetricsSnapshot snapshot() {
+        List<Long> latencySnapshot = new ArrayList<>(latencySamples);
+
         return new MetricsSnapshot(
             totalRequests.get(),
             copyAtomicMap(requestsByPool),
             copyAtomicMap(statusCodeBuckets),
-            new ArrayList<>(latencySamples),
+            latencySnapshot,
+            summarizeLatency(latencySnapshot),
             copyAtomicMap(upstreamRequestCounts),
             copyAtomicMap(errorCounts),
             copyPoolStatsMap(poolStats)
@@ -138,6 +142,40 @@ public class MetricsCollector {
         return Map.copyOf(copy);
     }
 
+    private LatencySummary summarizeLatency(List<Long> samples) {
+        if (samples.isEmpty()) {
+            return new LatencySummary(0, 0, 0, 0.0, 0, 0, 0);
+        }
+
+        List<Long> sorted = new ArrayList<>(samples);
+        Collections.sort(sorted);
+
+        int count = sorted.size();
+        long min = sorted.get(0);
+        long max = sorted.get(count - 1);
+        double avg = sorted.stream()
+            .mapToLong(Long::longValue)
+            .average()
+            .orElse(0.0);
+
+        return new LatencySummary(
+            count,
+            min,
+            max,
+            avg,
+            percentile(sorted, 0.50),
+            percentile(sorted, 0.95),
+            percentile(sorted, 0.99)
+        );
+    }
+
+    private long percentile(List<Long> sorted, double percentile) {
+        int count = sorted.size();
+        int index = (int) Math.ceil(percentile * count) - 1;
+        int clamped = Math.max(0, Math.min(index, count - 1));
+        return sorted.get(clamped);
+    }
+
     /**
      * Snapshot of all metrics exposed to MetricsVerticle.
      */
@@ -146,6 +184,7 @@ public class MetricsCollector {
         public final Map<String, Long> requestsByPool;
         public final Map<String, Long> statusCodeBuckets;
         public final List<Long> latencySamples;
+        public final LatencySummary latencySummary;
         public final Map<String, Long> upstreamRequestCounts;
         public final Map<String, Long> errorCounts;
         public final Map<String, PoolStats> poolStats;
@@ -154,6 +193,7 @@ public class MetricsCollector {
                                Map<String, Long> requestsByPool,
                                Map<String, Long> statusCodeBuckets,
                                List<Long> latencySamples,
+                               LatencySummary latencySummary,
                                Map<String, Long> upstreamRequestCounts,
                                Map<String, Long> errorCounts,
                                Map<String, PoolStats> poolStats) {
@@ -161,9 +201,33 @@ public class MetricsCollector {
             this.requestsByPool = requestsByPool;
             this.statusCodeBuckets = statusCodeBuckets;
             this.latencySamples = List.copyOf(latencySamples);
+            this.latencySummary = latencySummary;
             this.upstreamRequestCounts = upstreamRequestCounts;
             this.errorCounts = errorCounts;
             this.poolStats = poolStats;
+        }
+    }
+
+    /**
+     * Summary statistics calculated from a copied latency sample list.
+     */
+    public static class LatencySummary {
+        public final int count;
+        public final long min;
+        public final long max;
+        public final double avg;
+        public final long p50;
+        public final long p95;
+        public final long p99;
+
+        public LatencySummary(int count, long min, long max, double avg, long p50, long p95, long p99) {
+            this.count = count;
+            this.min = min;
+            this.max = max;
+            this.avg = avg;
+            this.p50 = p50;
+            this.p95 = p95;
+            this.p99 = p99;
         }
     }
 

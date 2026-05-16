@@ -18,6 +18,14 @@ class MockBackendHandler(BaseHTTPRequestHandler):
             })
             return
 
+        if parsed.path.endswith("/fail503"):
+            self._write_json(503, {
+                "service": self.service,
+                "status": "unavailable",
+                "path": parsed.path
+            })
+            return
+
         self._write_json(200, self._payload(parsed, None))
 
     def do_POST(self):

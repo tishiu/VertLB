@@ -1,6 +1,7 @@
 package io.vertilb.config;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.vertilb.pool.strategy.StrategyFactory;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.HashSet;
@@ -13,13 +14,18 @@ import java.util.Set;
  */
 public final class ConfigLoader {
     private static final ObjectMapper MAPPER = new ObjectMapper();
-    private static final Set<String> SUPPORTED_STRATEGIES = Set.of(
-        "round-robin",
-        "random",
-        "least-connections",
-        "ip-hash"
-    );
     private static final Set<String> SUPPORTED_PROTOCOLS = Set.of("http", "https");
+    private static final Set<String> SUPPORTED_HTTP_METHODS = Set.of(
+        "GET",
+        "POST",
+        "PUT",
+        "PATCH",
+        "DELETE",
+        "HEAD",
+        "OPTIONS",
+        "TRACE",
+        "CONNECT"
+    );
 
     private ConfigLoader() {
     }
@@ -47,6 +53,10 @@ public final class ConfigLoader {
     }
 
     private static void applyDefaults(AppConfig config) {
+        if (config == null) {
+            return;
+        }
+
         if (config.routes == null) {
             config.routes = List.of();
         }
@@ -63,17 +73,7 @@ public final class ConfigLoader {
             config.defaults.retries = new RetryConfig();
         }
 
-        if (config.defaults.retries.maxAttempts == null) {
-            config.defaults.retries.maxAttempts = 1;
-        }
-
-        if (config.defaults.retries.retryableStatuses == null) {
-            config.defaults.retries.retryableStatuses = List.of(502, 503, 504);
-        }
-
-        if (config.defaults.retries.backoffMs == null) {
-            config.defaults.retries.backoffMs = 100L;
-        }
+        applyRetryDefaults(config.defaults.retries);
 
         if (config.defaults.logging == null) {
             config.defaults.logging = new LoggingConfig();
@@ -83,27 +83,16 @@ public final class ConfigLoader {
             config.defaults.logging.level = "info";
         }
 
-        if (config.metrics == null) {
-            config.metrics = config.defaults.metrics == null ? new MetricsConfig() : config.defaults.metrics;
+        if (config.metrics == null && config.defaults.metrics != null) {
+            config.metrics = config.defaults.metrics;
         }
 
-        if (config.metrics.enabled == null) {
-            config.metrics.enabled = true;
-        }
+        applyMetricsDefaults(config.metrics);
+        applyListenerDefaults(config.listeners);
 
-        if (config.metrics.port == null) {
-            config.metrics.port = 9090;
-        }
-
-        if (config.metrics.path == null || config.metrics.path.isBlank()) {
-            config.metrics.path = "/metrics";
-        }
-
-        if (config.listeners != null) {
-            for (ListenerConfig listener : config.listeners) {
-                if (listener != null && (listener.host == null || listener.host.isBlank())) {
-                    listener.host = "0.0.0.0";
-                }
+        if (config.routes != null) {
+            for (RouteConfig route : config.routes) {
+                applyRouteDefaults(route);
             }
         }
 
@@ -111,6 +100,56 @@ public final class ConfigLoader {
             for (PoolConfig pool : config.pools) {
                 applyPoolDefaults(pool);
             }
+        }
+    }
+
+    private static void applyRetryDefaults(RetryConfig retries) {
+        if (retries.maxAttempts == null) {
+            retries.maxAttempts = 3;
+        }
+
+        if (retries.retryableStatuses == null) {
+            retries.retryableStatuses = List.of(502, 503, 504);
+        }
+
+        if (retries.backoffMs == null) {
+            retries.backoffMs = 100L;
+        }
+    }
+
+    private static void applyMetricsDefaults(MetricsConfig metrics) {
+        if (metrics == null || !Boolean.TRUE.equals(metrics.enabled)) {
+            return;
+        }
+
+        if (metrics.port == null) {
+            metrics.port = 9100;
+        }
+
+        if (metrics.path == null || metrics.path.isBlank()) {
+            metrics.path = "/metrics";
+        }
+    }
+
+    private static void applyListenerDefaults(List<ListenerConfig> listeners) {
+        if (listeners == null) {
+            return;
+        }
+
+        for (ListenerConfig listener : listeners) {
+            if (listener != null && (listener.host == null || listener.host.isBlank())) {
+                listener.host = "0.0.0.0";
+            }
+        }
+    }
+
+    private static void applyRouteDefaults(RouteConfig route) {
+        if (route == null) {
+            return;
+        }
+
+        if (route.host != null && route.host.isBlank()) {
+            route.host = null;
         }
     }
 
@@ -125,46 +164,54 @@ public final class ConfigLoader {
 
         if (pool.upstreams != null) {
             for (UpstreamConfig upstream : pool.upstreams) {
-                if (upstream != null && (upstream.protocol == null || upstream.protocol.isBlank())) {
-                    upstream.protocol = "http";
-                }
+                applyUpstreamDefaults(upstream);
             }
         }
 
-        if (pool.healthCheck == null) {
-            pool.healthCheck = new HealthCheckConfig();
+        applyHealthCheckDefaults(pool.healthCheck);
+    }
+
+    private static void applyUpstreamDefaults(UpstreamConfig upstream) {
+        if (upstream == null) {
+            return;
         }
 
-        if (pool.healthCheck.enabled == null) {
-            pool.healthCheck.enabled = true;
+        if (upstream.protocol == null || upstream.protocol.isBlank()) {
+            upstream.protocol = "http";
         }
 
-        if (pool.healthCheck.intervalMs == null) {
-            pool.healthCheck.intervalMs = 10_000L;
+        if (upstream.weight == null || upstream.weight <= 0) {
+            upstream.weight = 1;
+        }
+    }
+
+    private static void applyHealthCheckDefaults(HealthCheckConfig healthCheck) {
+        if (healthCheck == null || !Boolean.TRUE.equals(healthCheck.enabled)) {
+            return;
         }
 
-        if (pool.healthCheck.timeoutMs == null) {
-            pool.healthCheck.timeoutMs = 5_000L;
+        if (healthCheck.intervalMs == null) {
+            healthCheck.intervalMs = 10_000L;
         }
 
-        if (pool.healthCheck.path == null || pool.healthCheck.path.isBlank()) {
-            pool.healthCheck.path = "/health";
+        if (healthCheck.timeoutMs == null) {
+            healthCheck.timeoutMs = 5_000L;
         }
 
-        if (pool.healthCheck.method == null || pool.healthCheck.method.isBlank()) {
-            pool.healthCheck.method = "GET";
+        if (healthCheck.path == null || healthCheck.path.isBlank()) {
+            healthCheck.path = "/health";
         }
 
-        if (pool.healthCheck.expectedStatuses == null) {
-            pool.healthCheck.expectedStatuses = List.of(200);
+        if (healthCheck.method == null || healthCheck.method.isBlank()) {
+            healthCheck.method = "GET";
         }
 
-        if (pool.healthCheck.successThreshold == null) {
-            pool.healthCheck.successThreshold = 2;
+        if (healthCheck.successThreshold == null) {
+            healthCheck.successThreshold = 2;
         }
 
-        if (pool.healthCheck.failureThreshold == null) {
-            pool.healthCheck.failureThreshold = 3;
+        if (healthCheck.failureThreshold == null) {
+            healthCheck.failureThreshold = 3;
         }
     }
 
@@ -172,6 +219,8 @@ public final class ConfigLoader {
         if (config == null) {
             throw new IllegalArgumentException("Config is required");
         }
+
+        validateRetry(config.defaults.retries);
 
         Set<Integer> listenerPorts = validateListeners(config.listeners);
         Set<String> poolNames = validatePools(config.pools);
@@ -200,6 +249,45 @@ public final class ConfigLoader {
         return listenerPorts;
     }
 
+    private static void validateRoutes(List<RouteConfig> routes, Set<String> poolNames) {
+        if (routes == null || routes.isEmpty()) {
+            throw new IllegalArgumentException("At least one route is required");
+        }
+
+        for (RouteConfig route : routes) {
+            if (route == null) {
+                throw new IllegalArgumentException("Route is required");
+            }
+
+            if (route.pathPrefix == null || route.pathPrefix.isBlank()) {
+                throw new IllegalArgumentException("Route pathPrefix is required");
+            }
+
+            if (!route.pathPrefix.startsWith("/")) {
+                throw new IllegalArgumentException("Route pathPrefix must start with /");
+            }
+
+            if (route.poolName == null || route.poolName.isBlank()) {
+                throw new IllegalArgumentException("Route poolName is required");
+            }
+
+            if (!poolNames.contains(route.poolName)) {
+                throw new IllegalArgumentException("Route references unknown pool: " + route.poolName);
+            }
+
+            if (route.methods != null) {
+                for (String method : route.methods) {
+                    if (!isValidHttpMethod(method)) {
+                        throw new IllegalArgumentException("Invalid route method: " + method);
+                    }
+                }
+            }
+
+            validateOptionalPathPrefix(route.stripPrefix, "Route stripPrefix");
+            validateOptionalPathPrefix(route.addPrefix, "Route addPrefix");
+        }
+    }
+
     private static Set<String> validatePools(List<PoolConfig> pools) {
         if (pools == null || pools.isEmpty()) {
             throw new IllegalArgumentException("At least one pool is required");
@@ -219,12 +307,9 @@ public final class ConfigLoader {
                 throw new IllegalArgumentException("Duplicate pool name: " + pool.name);
             }
 
-            String strategy = pool.strategy.toLowerCase(Locale.ROOT);
-            if (!SUPPORTED_STRATEGIES.contains(strategy)) {
-                throw new IllegalArgumentException("Unsupported pool strategy: " + pool.strategy);
-            }
-
+            validateStrategy(pool.strategy);
             validateUpstreams(pool);
+            validateHealthCheck(pool.healthCheck);
         }
 
         return poolNames;
@@ -259,47 +344,105 @@ public final class ConfigLoader {
             if (!SUPPORTED_PROTOCOLS.contains(protocol)) {
                 throw new IllegalArgumentException("Unsupported upstream protocol: " + upstream.protocol);
             }
+        }
+    }
 
-            if (upstream.weight != null && upstream.weight <= 0) {
-                throw new IllegalArgumentException("Upstream weight must be positive: " + upstream.id);
+    private static void validateRetry(RetryConfig retries) {
+        if (retries.maxAttempts < 1) {
+            throw new IllegalArgumentException("Retry maxAttempts must be at least 1");
+        }
+
+        if (retries.backoffMs < 0) {
+            throw new IllegalArgumentException("Retry backoffMs must be >= 0");
+        }
+
+        for (Integer status : retries.retryableStatuses) {
+            if (!isValidStatusCode(status)) {
+                throw new IllegalArgumentException("Invalid retryable status: " + status);
             }
         }
     }
 
-    private static void validateRoutes(List<RouteConfig> routes, Set<String> poolNames) {
-        if (routes == null || routes.isEmpty()) {
-            throw new IllegalArgumentException("At least one route is required");
+    private static void validateHealthCheck(HealthCheckConfig healthCheck) {
+        if (healthCheck == null || !Boolean.TRUE.equals(healthCheck.enabled)) {
+            return;
         }
 
-        for (RouteConfig route : routes) {
-            if (route == null) {
-                throw new IllegalArgumentException("Route is required");
-            }
+        if (healthCheck.intervalMs <= 0) {
+            throw new IllegalArgumentException("Health check intervalMs must be > 0");
+        }
 
-            if (route.pathPrefix == null || route.pathPrefix.isBlank()) {
-                throw new IllegalArgumentException("Route pathPrefix is required");
-            }
+        if (healthCheck.timeoutMs <= 0) {
+            throw new IllegalArgumentException("Health check timeoutMs must be > 0");
+        }
 
-            if (route.poolName == null || route.poolName.isBlank()) {
-                throw new IllegalArgumentException("Route poolName is required");
-            }
+        if (healthCheck.path == null || healthCheck.path.isBlank()) {
+            throw new IllegalArgumentException("Health check path is required");
+        }
 
-            if (!poolNames.contains(route.poolName)) {
-                throw new IllegalArgumentException("Route references unknown pool: " + route.poolName);
+        if (!healthCheck.path.startsWith("/")) {
+            throw new IllegalArgumentException("Health check path must start with /");
+        }
+
+        if (!isValidHttpMethod(healthCheck.method)) {
+            throw new IllegalArgumentException("Invalid health check method: " + healthCheck.method);
+        }
+
+        if (healthCheck.successThreshold <= 0) {
+            throw new IllegalArgumentException("Health check successThreshold must be > 0");
+        }
+
+        if (healthCheck.failureThreshold <= 0) {
+            throw new IllegalArgumentException("Health check failureThreshold must be > 0");
+        }
+
+        if (healthCheck.expectedStatuses != null) {
+            for (Integer status : healthCheck.expectedStatuses) {
+                if (!isValidStatusCode(status)) {
+                    throw new IllegalArgumentException("Invalid health check expected status: " + status);
+                }
             }
         }
     }
 
     private static void validateMetrics(MetricsConfig metrics, Set<Integer> listenerPorts) {
-        if (Boolean.FALSE.equals(metrics.enabled)) {
+        if (metrics == null || !Boolean.TRUE.equals(metrics.enabled)) {
             return;
         }
 
         validatePort(metrics.port, "Metrics port");
 
+        if (!metrics.path.startsWith("/")) {
+            throw new IllegalArgumentException("Metrics path must start with /");
+        }
+
         if (listenerPorts.contains(metrics.port)) {
             throw new IllegalArgumentException("Metrics port must not equal a listener port: " + metrics.port);
         }
+    }
+
+    private static void validateStrategy(String strategy) {
+        try {
+            StrategyFactory.create(strategy);
+        } catch (IllegalArgumentException error) {
+            throw new IllegalArgumentException("Unsupported pool strategy: " + strategy, error);
+        }
+    }
+
+    private static void validateOptionalPathPrefix(String value, String fieldName) {
+        if (value != null && !value.isBlank() && !value.startsWith("/")) {
+            throw new IllegalArgumentException(fieldName + " must start with /");
+        }
+    }
+
+    private static boolean isValidHttpMethod(String method) {
+        return method != null
+            && !method.isBlank()
+            && SUPPORTED_HTTP_METHODS.contains(method.toUpperCase(Locale.ROOT));
+    }
+
+    private static boolean isValidStatusCode(Integer status) {
+        return status != null && status >= 100 && status <= 599;
     }
 
     private static void validatePort(int port, String fieldName) {

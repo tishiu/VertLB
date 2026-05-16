@@ -14,11 +14,12 @@ import io.vertilb.pool.Upstream;
 import io.vertilb.pool.UpstreamPool;
 import io.vertilb.pool.strategy.RoundRobinStrategy;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 
 /**
- * Test skeleton for immediate probing, periodic health checks, and threshold transitions.
+ * Tests immediate probing, health transitions, and disabled health-check behavior.
  */
 @ExtendWith(VertxExtension.class)
 class HealthCheckerTest {
@@ -90,6 +91,135 @@ class HealthCheckerTest {
             }));
     }
 
+    @Test
+    void probeCycleCompletesWhenOneUpstreamFails(Vertx vertx, VertxTestContext testContext) {
+        vertx.createHttpServer()
+            .requestHandler(request -> request.response().setStatusCode(204).end())
+            .listen(0)
+            .onFailure(testContext::failNow)
+            .onSuccess(healthyServer -> {
+                vertx.createHttpServer()
+                    .requestHandler(request -> request.response().setStatusCode(500).end())
+                    .listen(0)
+                    .onFailure(testContext::failNow)
+                    .onSuccess(failingServer -> {
+                        Upstream healthy = upstream("healthy", healthyServer.actualPort());
+                        Upstream failing = upstream("failing", failingServer.actualPort());
+                        MetricsCollector metrics = new MetricsCollector();
+
+                        vertx.deployVerticle(new HealthChecker(
+                            pool(healthy, failing),
+                            config(204),
+                            new AppLogger(),
+                            metrics
+                        )).onFailure(testContext::failNow)
+                            .onSuccess(id -> testContext.verify(() -> {
+                                assertEquals(HealthStatus.HEALTHY, healthy.healthStatus());
+                                assertEquals(HealthStatus.UNHEALTHY, failing.healthStatus());
+                                assertPoolStats(metrics, 2, 1, 1, 0);
+                                healthyServer.close()
+                                    .onComplete(closeHealthy -> failingServer.close()
+                                        .onComplete(closeFailing -> testContext.completeNow()));
+                            }));
+                    });
+            });
+    }
+
+    @Test
+    void updatesUnknownStatsWhenThresholdIsNotReached(Vertx vertx, VertxTestContext testContext) {
+        vertx.createHttpServer()
+            .requestHandler(request -> request.response().setStatusCode(204).end())
+            .listen(0)
+            .onFailure(testContext::failNow)
+            .onSuccess(server -> {
+                Upstream upstream = upstream(server.actualPort());
+                MetricsCollector metrics = new MetricsCollector();
+                HealthCheckConfig config = config(204);
+                config.successThreshold = 2;
+
+                vertx.deployVerticle(new HealthChecker(
+                    pool(upstream),
+                    config,
+                    new AppLogger(),
+                    metrics
+                )).onFailure(testContext::failNow)
+                    .onSuccess(id -> testContext.verify(() -> {
+                        assertEquals(HealthStatus.UNKNOWN, upstream.healthStatus());
+                        assertPoolStats(metrics, 1, 0, 0, 1);
+                        server.close().onComplete(ignored -> testContext.completeNow());
+                    }));
+            });
+    }
+
+    @Test
+    void acceptsTwoAndThreeHundredStatusesWhenExpectedStatusesAreEmpty(Vertx vertx,
+                                                                        VertxTestContext testContext) {
+        vertx.createHttpServer()
+            .requestHandler(request -> request.response().setStatusCode(302).end())
+            .listen(0)
+            .onFailure(testContext::failNow)
+            .onSuccess(server -> {
+                Upstream upstream = upstream(server.actualPort());
+                MetricsCollector metrics = new MetricsCollector();
+                HealthCheckConfig config = config(204);
+                config.expectedStatuses = List.of();
+
+                vertx.deployVerticle(new HealthChecker(
+                    pool(upstream),
+                    config,
+                    new AppLogger(),
+                    metrics
+                )).onFailure(testContext::failNow)
+                    .onSuccess(id -> testContext.verify(() -> {
+                        assertEquals(HealthStatus.HEALTHY, upstream.healthStatus());
+                        assertPoolStats(metrics, 1, 1, 0, 0);
+                        server.close().onComplete(ignored -> testContext.completeNow());
+                    }));
+            });
+    }
+
+    @Test
+    void skipsPeriodicProbeWhenPreviousCycleIsStillRunning(Vertx vertx, VertxTestContext testContext) {
+        AtomicInteger activeRequests = new AtomicInteger();
+        AtomicInteger maxActiveRequests = new AtomicInteger();
+
+        vertx.createHttpServer()
+            .requestHandler(request -> {
+                int active = activeRequests.incrementAndGet();
+                maxActiveRequests.updateAndGet(current -> Math.max(current, active));
+
+                vertx.setTimer(150, ignored -> {
+                    activeRequests.decrementAndGet();
+                    request.response().setStatusCode(204).end();
+                });
+            })
+            .listen(0)
+            .onFailure(testContext::failNow)
+            .onSuccess(server -> {
+                Upstream upstream = upstream(server.actualPort());
+                MetricsCollector metrics = new MetricsCollector();
+                HealthCheckConfig config = config(204);
+                config.intervalMs = 20L;
+                config.timeoutMs = 1_000L;
+
+                vertx.deployVerticle(new HealthChecker(
+                    pool(upstream),
+                    config,
+                    new AppLogger(),
+                    metrics
+                )).onFailure(testContext::failNow)
+                    .onSuccess(deploymentId -> vertx.setTimer(350, ignored ->
+                        vertx.undeploy(deploymentId)
+                            .onFailure(testContext::failNow)
+                            .onSuccess(undeployed -> testContext.verify(() -> {
+                                assertEquals(1, maxActiveRequests.get());
+                                assertPoolStats(metrics, 1, 1, 0, 0);
+                                server.close().onComplete(close -> testContext.completeNow());
+                            }))
+                    ));
+            });
+    }
+
     private HealthCheckConfig config(int expectedStatus) {
         HealthCheckConfig config = new HealthCheckConfig();
         config.enabled = true;
@@ -104,11 +234,15 @@ class HealthCheckerTest {
     }
 
     private Upstream upstream(int port) {
-        return new Upstream("upstream-1", "localhost", port, "http", 1, null);
+        return upstream("upstream-1", port);
     }
 
-    private UpstreamPool pool(Upstream upstream) {
-        return new UpstreamPool("pool", List.of(upstream), new RoundRobinStrategy());
+    private Upstream upstream(String id, int port) {
+        return new Upstream(id, "localhost", port, "http", 1, null);
+    }
+
+    private UpstreamPool pool(Upstream... upstreams) {
+        return new UpstreamPool("pool", List.of(upstreams), new RoundRobinStrategy());
     }
 
     private void assertPoolStats(MetricsCollector metrics,

@@ -74,6 +74,7 @@ public class HttpProxy {
      */
     public Future<Void> forward(RequestContext ctx, Upstream upstream) {
         Promise<Void> promise = Promise.promise();
+        attachClientExceptionHandlers(ctx, promise);
 
         RequestOptions options = new RequestOptions()
             .setMethod(ctx.clientRequest.method())
@@ -84,13 +85,13 @@ public class HttpProxy {
             .setTimeout(requestTimeoutMs);
 
         httpClient.request(options)
-            .onFailure(error -> failProxy(ctx, promise, error))
+            .onFailure(error -> failProxy(promise, error))
             .onSuccess(outboundRequest -> {
                 copyRequestHeaders(ctx, upstream, outboundRequest);
                 attachRequestExceptionHandler(ctx, promise, outboundRequest);
 
                 sendRequestBody(ctx, outboundRequest)
-                    .onFailure(error -> failProxy(ctx, promise, error))
+                    .onFailure(error -> failProxy(promise, error))
                     .onSuccess(upstreamResponse -> handleUpstreamResponse(ctx, upstreamResponse, promise));
             });
 
@@ -103,12 +104,14 @@ public class HttpProxy {
         MultiMap inboundHeaders = ctx.clientRequest.headers();
 
         for (String name : inboundHeaders.names()) {
-            if (isHopByHopHeader(name)) {
+            if (!isValidHeaderName(name) || isHopByHopHeader(name)) {
                 continue;
             }
 
             for (String value : inboundHeaders.getAll(name)) {
-                outboundRequest.putHeader(name, value);
+                if (value != null) {
+                    outboundRequest.putHeader(name, value);
+                }
             }
         }
 
@@ -129,10 +132,15 @@ public class HttpProxy {
         outboundRequest.putHeader("X-Forwarded-Method", ctx.clientRequest.method().name());
     }
 
+    private void attachClientExceptionHandlers(RequestContext ctx, Promise<Void> promise) {
+        ctx.clientRequest.exceptionHandler(error -> failProxy(promise, error));
+        ctx.response().exceptionHandler(error -> failProxy(promise, error));
+    }
+
     private void attachRequestExceptionHandler(RequestContext ctx,
                                                Promise<Void> promise,
                                                HttpClientRequest outboundRequest) {
-        outboundRequest.exceptionHandler(error -> failProxy(ctx, promise, error));
+        outboundRequest.exceptionHandler(error -> failProxy(promise, error));
     }
 
     private Future<HttpClientResponse> sendRequestBody(RequestContext ctx,
@@ -149,74 +157,86 @@ public class HttpProxy {
     private void handleUpstreamResponse(RequestContext ctx,
                                         HttpClientResponse upstreamResponse,
                                         Promise<Void> promise) {
+        if (promise.future().isComplete()) {
+            upstreamResponse.resume();
+            return;
+        }
+
         int statusCode = upstreamResponse.statusCode();
         ctx.responseStatusCode = statusCode;
 
         if (RETRYABLE_STATUS_CODES.contains(statusCode)) {
             drainRetryableResponse(upstreamResponse)
-                .onComplete(ignored -> {
-                    if (!promise.future().isComplete()) {
-                        promise.fail(new ProxyException("Retryable upstream status: " + statusCode));
-                    }
-                });
+                .onComplete(ignored -> failProxy(
+                    promise,
+                    new ProxyException("Retryable upstream status: " + statusCode)
+                ));
             return;
         }
 
-        writeResponseHead(ctx, upstreamResponse);
+        if (!writeResponseHead(ctx, upstreamResponse)) {
+            drainRetryableResponse(upstreamResponse)
+                .onComplete(ignored -> completeProxy(promise));
+            return;
+        }
 
         upstreamResponse.pipeTo(ctx.response())
-            .onSuccess(ignored -> {
-                if (!promise.future().isComplete()) {
-                    promise.complete();
-                }
-            })
-            .onFailure(error -> failProxy(ctx, promise, error));
+            .onSuccess(ignored -> completeProxy(promise))
+            .onFailure(error -> failProxy(promise, error));
     }
 
     private Future<Void> drainRetryableResponse(HttpClientResponse upstreamResponse) {
         Promise<Void> promise = Promise.promise();
 
-        upstreamResponse.exceptionHandler(promise::fail);
-        upstreamResponse.endHandler(ignored -> promise.complete());
+        upstreamResponse.exceptionHandler(promise::tryFail);
+        upstreamResponse.endHandler(ignored -> promise.tryComplete());
         upstreamResponse.resume();
 
         return promise.future();
     }
 
-    private void writeResponseHead(RequestContext ctx, HttpClientResponse upstreamResponse) {
+    private boolean writeResponseHead(RequestContext ctx, HttpClientResponse upstreamResponse) {
         if (ctx.response().ended()) {
-            return;
+            return false;
         }
 
         ctx.response().setStatusCode(upstreamResponse.statusCode());
 
         for (String name : upstreamResponse.headers().names()) {
-            if (isHopByHopHeader(name)) {
+            if (!isValidHeaderName(name) || isHopByHopHeader(name)) {
                 continue;
             }
 
             for (String value : upstreamResponse.headers().getAll(name)) {
-                ctx.response().putHeader(name, value);
+                if (value != null) {
+                    ctx.response().putHeader(name, value);
+                }
             }
         }
+
+        return true;
     }
 
-    private void failProxy(RequestContext ctx, Promise<Void> promise, Throwable error) {
-        if (promise.future().isComplete()) {
-            return;
-        }
-
+    private void failProxy(Promise<Void> promise, Throwable error) {
         if (isTimeout(error)) {
-            promise.fail(new UpstreamTimeoutException("Upstream request timed out", error));
+            promise.tryFail(new UpstreamTimeoutException("Upstream request timed out", error));
             return;
         }
 
-        promise.fail(error);
+        promise.tryFail(error);
+    }
+
+    private void completeProxy(Promise<Void> promise) {
+        promise.tryComplete();
     }
 
     private boolean isHopByHopHeader(String name) {
         return name != null
             && HOP_BY_HOP_HEADERS.contains(name.toLowerCase(Locale.ROOT));
+    }
+
+    private boolean isValidHeaderName(String name) {
+        return name != null && !name.isBlank();
     }
 
     private boolean isTimeout(Throwable error) {
