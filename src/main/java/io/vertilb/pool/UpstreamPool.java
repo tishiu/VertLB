@@ -17,6 +17,7 @@ public class UpstreamPool {
     private final String name;
     private final List<Upstream> upstreams;
     private final BalancingStrategy strategy;
+    private volatile List<Upstream> selectableUpstreams;
 
     public UpstreamPool(String name, List<Upstream> upstreams, BalancingStrategy strategy) {
         this.name = Objects.requireNonNull(name, "name must not be null");
@@ -24,6 +25,7 @@ public class UpstreamPool {
         this.strategy = Objects.requireNonNull(strategy, "strategy must not be null");
 
         initializeStrategyMetadata();
+        rebuildSelectableCache();
     }
 
     private void initializeStrategyMetadata() {
@@ -44,7 +46,7 @@ public class UpstreamPool {
      * @return selected upstream when one is available
      */
     public Optional<Upstream> selectUpstream(RequestContext ctx) {
-        List<Upstream> selectable = getHealthyUpstreams();
+        List<Upstream> selectable = selectableUpstreams;
 
         if (selectable.isEmpty()) {
             return Optional.empty();
@@ -55,22 +57,21 @@ public class UpstreamPool {
     }
 
     /**
-     * The method name is kept for scaffold compatibility.
-     * Actual behavior: returns selectable upstreams.
+     * Returns the cached immutable snapshot of selectable upstreams.
      *
-     * UNKNOWN + HEALTHY pass.
+     * UNKNOWN + HEALTHY are selectable.
      * UNHEALTHY is excluded.
      */
+    public List<Upstream> getSelectableUpstreams() {
+        return selectableUpstreams;
+    }
+
+    /**
+     * Legacy name. Returns selectable upstreams, not only HEALTHY upstreams.
+     */
+    @Deprecated
     public List<Upstream> getHealthyUpstreams() {
-        List<Upstream> result = new ArrayList<>();
-
-        for (Upstream upstream : upstreams) {
-            if (upstream.isSelectable()) {
-                result.add(upstream);
-            }
-        }
-
-        return result;
+        return getSelectableUpstreams();
     }
 
     /**
@@ -82,10 +83,27 @@ public class UpstreamPool {
     public void updateHealthStatus(String upstreamId, HealthStatus status) {
         for (Upstream upstream : upstreams) {
             if (upstream.id().equals(upstreamId)) {
+                if (upstream.healthStatus() == status) {
+                    return;
+                }
+
                 upstream.setHealthStatus(status);
+                rebuildSelectableCache();
                 return;
             }
         }
+    }
+
+    private void rebuildSelectableCache() {
+        List<Upstream> result = new ArrayList<>();
+
+        for (Upstream upstream : upstreams) {
+            if (upstream.isSelectable()) {
+                result.add(upstream);
+            }
+        }
+
+        selectableUpstreams = List.copyOf(result);
     }
 
     /**

@@ -103,7 +103,7 @@ sequenceDiagram
     E-->>L: response completed
 ```
 
-`CoreEngine` retries only safe methods when the failure is retryable. Retryable upstream statuses are `502`, `503`, and `504`. If no selectable upstream exists, the request is completed as a gateway failure instead of reaching the proxy.
+`CoreEngine` retries only safe methods when the failure is retryable according to the configured retry policy. If no selectable upstream exists, the request is completed as a gateway failure instead of reaching the proxy.
 
 ## Config Model
 
@@ -113,6 +113,7 @@ VertiLB is configured around listeners, routes, pools, upstreams, health checks,
 - routes decide which pool receives a request
 - pools group upstream instances and define the balancing strategy
 - health checks update whether an upstream remains selectable
+- `UNKNOWN` and `HEALTHY` upstreams are selectable; only `UNHEALTHY` upstreams are excluded
 
 ## Run Locally
 
@@ -122,3 +123,16 @@ VertiLB is configured around listeners, routes, pools, upstreams, health checks,
 ```
 
 The smoke script starts mock backends, starts VertiLB, checks routed traffic, verifies retryable upstream status handling, and reads the metrics endpoint.
+
+## Stress Test Result
+
+Measured locally against `GET /api/users/1?debug=true` with one healthy upstream and persistent HTTP/1.1 connections for `10s` per run.
+
+Key result: peak observed throughput in this run was `~944 QPS` at `128` concurrent clients.
+
+| Concurrency | Requests | QPS | Avg Latency | P95 | Errors |
+|---|---:|---:|---:|---:|---:|
+| 1 | 2,644 | 264.3 | 3.8 ms | 10.7 ms | 0 |
+| 16 | 6,115 | 609.8 | 26.2 ms | 37.8 ms | 0 |
+| 64 | 8,224 | 816.0 | 78.1 ms | 104.6 ms | 0 |
+| 128 | 9,573 | 944.2 | 134.5 ms | 160.2 ms | 0 |

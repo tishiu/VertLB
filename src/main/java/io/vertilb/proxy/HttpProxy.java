@@ -35,10 +35,9 @@ public class HttpProxy {
         "proxy-authenticate"
     );
 
-    private static final Set<Integer> RETRYABLE_STATUS_CODES = Set.of(502, 503, 504);
-
     private final HttpClient httpClient;
     private final long requestTimeoutMs;
+    private final Set<Integer> retryCandidateStatusCodes;
 
     /**
      * Creates a proxy with default request timeout.
@@ -46,7 +45,7 @@ public class HttpProxy {
      * @param vertx Vert.x instance
      */
     public HttpProxy(Vertx vertx) {
-        this(vertx, 30_000L);
+        this(vertx, 30_000L, Set.of(502, 503, 504));
     }
 
     /**
@@ -56,6 +55,10 @@ public class HttpProxy {
      * @param requestTimeoutMs upstream request timeout in milliseconds
      */
     public HttpProxy(Vertx vertx, long requestTimeoutMs) {
+        this(vertx, requestTimeoutMs, Set.of(502, 503, 504));
+    }
+
+    public HttpProxy(Vertx vertx, long requestTimeoutMs, Set<Integer> retryCandidateStatusCodes) {
         HttpClientOptions options = new HttpClientOptions()
             .setKeepAlive(true)
             .setReuseAddress(true)
@@ -63,6 +66,7 @@ public class HttpProxy {
 
         this.httpClient = vertx.createHttpClient(options);
         this.requestTimeoutMs = requestTimeoutMs;
+        this.retryCandidateStatusCodes = Set.copyOf(retryCandidateStatusCodes);
     }
 
     /**
@@ -165,7 +169,7 @@ public class HttpProxy {
         int statusCode = upstreamResponse.statusCode();
         ctx.responseStatusCode = statusCode;
 
-        if (RETRYABLE_STATUS_CODES.contains(statusCode)) {
+        if (retryCandidateStatusCodes.contains(statusCode)) {
             drainRetryableResponse(upstreamResponse)
                 .onComplete(ignored -> failProxy(
                     promise,

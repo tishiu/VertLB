@@ -3,8 +3,11 @@ package io.vertilb.pool;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.vertilb.engine.RequestContext;
+import io.vertilb.pool.strategy.BalancingStrategy;
 import io.vertilb.pool.strategy.LeastConnectionsStrategy;
 import io.vertilb.pool.strategy.RoundRobinStrategy;
 import java.util.List;
@@ -22,6 +25,51 @@ class UpstreamPoolTest {
         UpstreamPool pool = new UpstreamPool("pool", List.of(first, second), new RoundRobinStrategy());
 
         assertEquals(first, pool.selectUpstream(null).orElseThrow());
+    }
+
+    @Test
+    void unknownUpstreamIsSelectable() {
+        Upstream upstream = upstream("first");
+        UpstreamPool pool = new UpstreamPool("pool", List.of(upstream), new RoundRobinStrategy());
+
+        assertEquals(upstream, pool.selectUpstream(null).orElseThrow());
+        assertEquals(List.of(upstream), pool.getSelectableUpstreams());
+    }
+
+    @Test
+    void healthyUpstreamIsSelectable() {
+        Upstream upstream = upstream("first");
+        upstream.setHealthStatus(HealthStatus.HEALTHY);
+        UpstreamPool pool = new UpstreamPool("pool", List.of(upstream), new RoundRobinStrategy());
+
+        assertEquals(upstream, pool.selectUpstream(null).orElseThrow());
+        assertEquals(List.of(upstream), pool.getSelectableUpstreams());
+    }
+
+    @Test
+    void unhealthyUpstreamIsExcluded() {
+        Upstream upstream = upstream("first");
+        upstream.setHealthStatus(HealthStatus.UNHEALTHY);
+        UpstreamPool pool = new UpstreamPool("pool", List.of(upstream), new RoundRobinStrategy());
+
+        assertTrue(pool.selectUpstream(null).isEmpty());
+        assertEquals(List.of(), pool.getSelectableUpstreams());
+    }
+
+    @Test
+    void legacyHealthyAliasMatchesSelectableUpstreams() {
+        Upstream unknown = upstream("unknown");
+        Upstream healthy = upstream("healthy");
+        healthy.setHealthStatus(HealthStatus.HEALTHY);
+        Upstream unhealthy = upstream("unhealthy");
+        unhealthy.setHealthStatus(HealthStatus.UNHEALTHY);
+        UpstreamPool pool = new UpstreamPool(
+            "pool",
+            List.of(unknown, healthy, unhealthy),
+            new RoundRobinStrategy()
+        );
+
+        assertEquals(pool.getSelectableUpstreams(), pool.getHealthyUpstreams());
     }
 
     @Test
@@ -43,6 +91,40 @@ class UpstreamPoolTest {
         pool.updateHealthStatus("first", HealthStatus.HEALTHY);
 
         assertEquals(HealthStatus.HEALTHY, upstream.healthStatus());
+    }
+
+    @Test
+    void updateHealthStatusRebuildsSelectableCache() {
+        Upstream first = upstream("first");
+        Upstream second = upstream("second");
+        UpstreamPool pool = new UpstreamPool("pool", List.of(first, second), new RoundRobinStrategy());
+
+        assertEquals(first, pool.selectUpstream(null).orElseThrow());
+
+        pool.updateHealthStatus("first", HealthStatus.UNHEALTHY);
+
+        assertEquals(second, pool.selectUpstream(null).orElseThrow());
+        assertEquals(List.of(second), pool.getSelectableUpstreams());
+
+        pool.updateHealthStatus("first", HealthStatus.HEALTHY);
+
+        assertTrue(pool.getSelectableUpstreams().contains(first));
+        assertEquals(first, pool.selectUpstream(null).orElseThrow());
+    }
+
+    @Test
+    void reusesSelectableSnapshotWhileHealthDoesNotChange() {
+        Upstream first = upstream("first");
+        Upstream second = upstream("second");
+        CapturingStrategy strategy = new CapturingStrategy();
+        UpstreamPool pool = new UpstreamPool("pool", List.of(first, second), strategy);
+
+        pool.selectUpstream(null);
+        List<Upstream> firstSnapshot = strategy.lastSelectableUpstreams;
+
+        pool.selectUpstream(null);
+
+        assertSame(firstSnapshot, strategy.lastSelectableUpstreams);
     }
 
     @Test
@@ -79,7 +161,18 @@ class UpstreamPoolTest {
         UpstreamPool pool = new UpstreamPool("pool", List.of(first, second), new RoundRobinStrategy());
 
         assertEquals(second, pool.selectUpstream(null).orElseThrow());
-        assertEquals(List.of(second), pool.getHealthyUpstreams());
+        assertEquals(List.of(second), pool.getSelectableUpstreams());
+    }
+
+    @Test
+    void selectUpstreamReturnsUnknownWhenItIsOnlyNonUnhealthyUpstream() {
+        Upstream unknown = upstream("unknown");
+        Upstream unhealthy = upstream("unhealthy");
+        unhealthy.setHealthStatus(HealthStatus.UNHEALTHY);
+        UpstreamPool pool = new UpstreamPool("pool", List.of(unknown, unhealthy), new RoundRobinStrategy());
+
+        assertEquals(List.of(unknown), pool.getSelectableUpstreams());
+        assertEquals(unknown, pool.selectUpstream(null).orElseThrow());
     }
 
     private Upstream upstream(String id) {
@@ -93,5 +186,15 @@ class UpstreamPoolTest {
         AtomicInteger counter = assertInstanceOf(AtomicInteger.class, value);
         assertEquals(expected, counter.get());
         assertTrue(counter.get() >= 0);
+    }
+
+    private static class CapturingStrategy implements BalancingStrategy {
+        private List<Upstream> lastSelectableUpstreams;
+
+        @Override
+        public Upstream select(List<Upstream> selectableUpstreams, RequestContext ctx) {
+            lastSelectableUpstreams = selectableUpstreams;
+            return selectableUpstreams.isEmpty() ? null : selectableUpstreams.get(0);
+        }
     }
 }

@@ -13,20 +13,19 @@ import io.vertilb.pool.UpstreamPool;
 import io.vertilb.proxy.HttpProxy;
 import io.vertx.core.Future;
 import io.vertx.core.Promise;
+import io.vertx.core.Vertx;
 
 /**
  * Core request engine that selects upstreams, drives retry attempts,
  * records metrics, and writes logs.
  */
 public class CoreEngine {
-    private static final Set<String> RETRYABLE_METHODS = Set.of("GET", "HEAD", "OPTIONS");
-    private static final Set<Integer> RETRYABLE_STATUSES = Set.of(502, 503, 504);
-
     private final Map<String, UpstreamPool> pools;
     private final HttpProxy proxy;
     private final AppLogger logger;
     private final MetricsCollector metrics;
-    private final int maxRetries;
+    private final RetryPolicy retryPolicy;
+    private final Vertx vertx;
 
     /**
      * Creates the core request orchestration engine.
@@ -35,18 +34,28 @@ public class CoreEngine {
      * @param proxy outbound proxy component
      * @param logger access/error logger
      * @param metrics metrics collector
-     * @param maxRetries extra retries after the first attempt
+     * @param retryPolicy retry configuration
      */
     public CoreEngine(Map<String, UpstreamPool> pools,
                       HttpProxy proxy,
                       AppLogger logger,
                       MetricsCollector metrics,
-                      int maxRetries) {
+                      RetryPolicy retryPolicy) {
+        this(pools, proxy, logger, metrics, retryPolicy, null);
+    }
+
+    public CoreEngine(Map<String, UpstreamPool> pools,
+                      HttpProxy proxy,
+                      AppLogger logger,
+                      MetricsCollector metrics,
+                      RetryPolicy retryPolicy,
+                      Vertx vertx) {
         this.pools = pools;
         this.proxy = proxy;
         this.logger = logger;
         this.metrics = metrics;
-        this.maxRetries = Math.max(0, maxRetries);
+        this.retryPolicy = retryPolicy;
+        this.vertx = vertx;
     }
 
     /**
@@ -111,7 +120,7 @@ public class CoreEngine {
                 pool.onRequestCompleted(upstream, ctx);
 
                 if (shouldRetry(ctx)) {
-                    attemptRequest(ctx, pool, promise);
+                    retryRequest(ctx, pool, promise);
                     return;
                 }
 
@@ -123,24 +132,16 @@ public class CoreEngine {
     }
 
     private boolean shouldRetry(RequestContext ctx) {
-        if (ctx.attemptCount > maxRetries) {
-            return false;
+        return retryPolicy.shouldRetry(ctx);
+    }
+
+    private void retryRequest(RequestContext ctx, UpstreamPool pool, Promise<Void> promise) {
+        if (retryPolicy.backoffMs() <= 0 || vertx == null) {
+            attemptRequest(ctx, pool, promise);
+            return;
         }
 
-        if (ctx.clientRequest == null || ctx.clientRequest.method() == null) {
-            return false;
-        }
-
-        String method = ctx.clientRequest.method().name().toUpperCase();
-        if (!RETRYABLE_METHODS.contains(method)) {
-            return false;
-        }
-
-        if (ctx.lastError != null && ctx.responseStatusCode == 0) {
-            return true;
-        }
-
-        return RETRYABLE_STATUSES.contains(ctx.responseStatusCode);
+        vertx.setTimer(retryPolicy.backoffMs(), ignored -> attemptRequest(ctx, pool, promise));
     }
 
     private int statusForFailure(RequestContext ctx) {

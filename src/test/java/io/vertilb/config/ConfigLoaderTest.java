@@ -5,6 +5,8 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -58,6 +60,9 @@ class ConfigLoaderTest {
 
         assertEquals(30_000, config.defaults.timeout);
         assertEquals(3, config.defaults.retries.maxAttempts);
+        assertEquals(3, config.defaults.retries.retryableStatuses.size());
+        assertEquals(100L, config.defaults.retries.backoffMs);
+        assertEquals("INFO", config.defaults.logging.level);
         assertEquals("0.0.0.0", config.listeners.get(0).host);
         assertEquals("round-robin", config.pools.get(0).strategy);
         assertEquals("http", config.pools.get(0).upstreams.get(0).protocol);
@@ -189,6 +194,39 @@ class ConfigLoaderTest {
     @Test
     void rejectsInvalidRetryStatus() throws Exception {
         String json = validConfig().replace("\"retryableStatuses\": [502, 503, 504]", "\"retryableStatuses\": [99]");
+
+        assertInvalid(json);
+    }
+
+    @Test
+    void rejectsNegativeRetryBackoff() throws Exception {
+        String json = validConfig().replace("\"backoffMs\": 100", "\"backoffMs\": -1");
+
+        assertInvalid(json);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"ERROR", "WARN", "INFO", "DEBUG", "TRACE"})
+    void loadsSupportedLoggingLevels(String level) throws Exception {
+        String json = validConfig().replace("\"level\": \"INFO\"", "\"level\": \"" + level + "\"");
+
+        AppConfig config = ConfigLoader.load(writeConfig(json).toString());
+
+        assertEquals(level, config.defaults.logging.level);
+    }
+
+    @Test
+    void normalizesLowercaseLoggingLevel() throws Exception {
+        String json = validConfig().replace("\"level\": \"INFO\"", "\"level\": \"debug\"");
+
+        AppConfig config = ConfigLoader.load(writeConfig(json).toString());
+
+        assertEquals("DEBUG", config.defaults.logging.level);
+    }
+
+    @Test
+    void rejectsInvalidLoggingLevel() throws Exception {
+        String json = validConfig().replace("\"level\": \"INFO\"", "\"level\": \"verbose\"");
 
         assertInvalid(json);
     }

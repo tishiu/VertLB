@@ -182,13 +182,14 @@ tasks.test {
 ### `Upstream.java`
 - Fields: `id`, `host`, `port`, `protocol`, `weight`, `healthStatus` (volatile), `metadata`.
 - `healthStatus` initialized to `HealthStatus.UNKNOWN`.
-- `isSelectable()` — returns `true` only when `healthStatus == HEALTHY`.
-  **Design decision**: keep JS behavior; UNKNOWN upstreams are NOT selectable.
+- `isSelectable()` — returns `true` when `healthStatus != UNHEALTHY`.
+  `UNKNOWN` and `HEALTHY` upstreams are selectable.
 
 ### `UpstreamPool.java`
-- `selectUpstream(RequestContext ctx)` — returns `Optional<Upstream>` of a healthy upstream
+- `selectUpstream(RequestContext ctx)` — returns `Optional<Upstream>` of a selectable upstream
   chosen by the pool's strategy.
-- `getHealthyUpstreams()` — returns list of upstreams where `isSelectable()` is true.
+- `getSelectableUpstreams()` — returns cached selectable upstream snapshot.
+- `getHealthyUpstreams()` — legacy alias that delegates to `getSelectableUpstreams()`.
 - `updateHealthStatus(String upstreamId, HealthStatus status)` — called by HealthChecker.
 
 ### `BalancingStrategy.java` (interface)
@@ -206,7 +207,8 @@ public interface BalancingStrategy {
 - `handleRequest(RequestContext ctx)` — retry loop up to `maxAttempts`; on each attempt
   select upstream, forward via `HttpProxy`, call `strategy.onRequestCompleted` on success.
   `finally` block always records metrics and writes access log.
-- Retryable statuses: `502`, `503`, `504`.
+- Retry behavior is delegated to config-driven `RetryPolicy`.
+- Retry backoff uses non-blocking `vertx.setTimer(...)`.
 - Retryable errors: connection refused, timeout, connection reset.
 
 ### `HealthChecker.java`
@@ -241,7 +243,7 @@ public interface BalancingStrategy {
 
 | JS behavior | VertiLB decision |
 |---|---|
-| UNKNOWN upstreams not selectable | **Keep** — same behavior |
+| UNKNOWN upstreams selectable | **Keep** — same behavior |
 | First health probe delayed by one interval | **Fix** — probe immediately on start |
 | `https` upstream uses `http.request` | **Fix** — use `https` client when protocol=https |
 | `onRequestComplete` vs `onRequestCompleted` mismatch | **Fix** — single name in interface |

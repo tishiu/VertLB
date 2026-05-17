@@ -1,6 +1,7 @@
 package io.vertilb;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -10,8 +11,10 @@ import io.vertilb.config.ConfigLoader;
 import io.vertilb.config.HealthCheckConfig;
 import io.vertilb.config.ListenerConfig;
 import io.vertilb.config.PoolConfig;
+import io.vertilb.config.RetryConfig;
 import io.vertilb.config.UpstreamConfig;
 import io.vertilb.engine.CoreEngine;
+import io.vertilb.engine.RetryPolicy;
 import io.vertilb.gateway.GatewayRouter;
 import io.vertilb.health.HealthChecker;
 import io.vertilb.http.ListenerVerticle;
@@ -52,7 +55,7 @@ public final class VertiLB {
 
         Vertx vertx = Vertx.vertx();
 
-        AppLogger logger = new AppLogger();
+        AppLogger logger = new AppLogger(config.defaults.logging.level);
         MetricsCollector metrics = new MetricsCollector();
 
         GatewayRouter router = new GatewayRouter(config.routes);
@@ -60,16 +63,16 @@ public final class VertiLB {
         Map<String, UpstreamPool> pools = buildPools(config);
 
         long timeoutMs = resolveTimeoutMs(config);
-        HttpProxy proxy = new HttpProxy(vertx, timeoutMs);
-
-        int maxRetries = resolveMaxRetries(config);
+        RetryPolicy retryPolicy = buildRetryPolicy(config);
+        HttpProxy proxy = new HttpProxy(vertx, timeoutMs, retryPolicy.retryableStatuses());
 
         CoreEngine engine = new CoreEngine(
             pools,
             proxy,
             logger,
             metrics,
-            maxRetries
+            retryPolicy,
+            vertx
         );
 
         deployListeners(vertx, config.listeners, router, engine);
@@ -181,22 +184,14 @@ public final class VertiLB {
             });
     }
 
-    private static int resolveMaxRetries(AppConfig config) {
-        if (config.defaults == null
-            || config.defaults.retries == null
-            || config.defaults.retries.maxAttempts == null) {
-            return 0;
-        }
+    private static RetryPolicy buildRetryPolicy(AppConfig config) {
+        RetryConfig retryConfig = config.defaults.retries;
 
-        /*
-         * Config uses maxAttempts.
-         * CoreEngine uses maxRetries.
-         *
-         * maxAttempts = 1 -> maxRetries = 0
-         * maxAttempts = 2 -> maxRetries = 1
-         * maxAttempts = 3 -> maxRetries = 2
-         */
-        return Math.max(0, config.defaults.retries.maxAttempts - 1);
+        return new RetryPolicy(
+            retryConfig.maxAttempts,
+            new HashSet<>(retryConfig.retryableStatuses),
+            retryConfig.backoffMs
+        );
     }
 
     private static long resolveTimeoutMs(AppConfig config) {

@@ -26,6 +26,13 @@ public final class ConfigLoader {
         "TRACE",
         "CONNECT"
     );
+    private static final Set<String> SUPPORTED_LOG_LEVELS = Set.of(
+        "ERROR",
+        "WARN",
+        "INFO",
+        "DEBUG",
+        "TRACE"
+    );
 
     private ConfigLoader() {
     }
@@ -74,14 +81,7 @@ public final class ConfigLoader {
         }
 
         applyRetryDefaults(config.defaults.retries);
-
-        if (config.defaults.logging == null) {
-            config.defaults.logging = new LoggingConfig();
-        }
-
-        if (config.defaults.logging.level == null || config.defaults.logging.level.isBlank()) {
-            config.defaults.logging.level = "info";
-        }
+        applyLoggingDefaults(config.defaults);
 
         if (config.metrics == null && config.defaults.metrics != null) {
             config.metrics = config.defaults.metrics;
@@ -115,6 +115,19 @@ public final class ConfigLoader {
         if (retries.backoffMs == null) {
             retries.backoffMs = 100L;
         }
+    }
+
+    private static void applyLoggingDefaults(DefaultsConfig defaults) {
+        if (defaults.logging == null) {
+            defaults.logging = new LoggingConfig();
+        }
+
+        if (defaults.logging.level == null || defaults.logging.level.isBlank()) {
+            defaults.logging.level = "INFO";
+            return;
+        }
+
+        defaults.logging.level = defaults.logging.level.trim().toUpperCase(Locale.ROOT);
     }
 
     private static void applyMetricsDefaults(MetricsConfig metrics) {
@@ -221,6 +234,7 @@ public final class ConfigLoader {
         }
 
         validateRetry(config.defaults.retries);
+        validateLogging(config.defaults.logging);
 
         Set<Integer> listenerPorts = validateListeners(config.listeners);
         Set<String> poolNames = validatePools(config.pools);
@@ -360,6 +374,16 @@ public final class ConfigLoader {
             if (!isValidStatusCode(status)) {
                 throw new IllegalArgumentException("Invalid retryable status: " + status);
             }
+        }
+    }
+
+    private static void validateLogging(LoggingConfig logging) {
+        if (logging == null || logging.level == null || logging.level.isBlank()) {
+            throw new IllegalArgumentException("Logging level is required");
+        }
+
+        if (!SUPPORTED_LOG_LEVELS.contains(logging.level)) {
+            throw new IllegalArgumentException("Invalid logging level: " + logging.level);
         }
     }
 
