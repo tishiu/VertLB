@@ -17,12 +17,21 @@ public class UpstreamPool {
     private final String name;
     private final List<Upstream> upstreams;
     private final BalancingStrategy strategy;
+    private final boolean unknownSelectable;
     private volatile List<Upstream> selectableUpstreams;
 
     public UpstreamPool(String name, List<Upstream> upstreams, BalancingStrategy strategy) {
+        this(name, upstreams, strategy, true);
+    }
+
+    public UpstreamPool(String name,
+                        List<Upstream> upstreams,
+                        BalancingStrategy strategy,
+                        boolean unknownSelectable) {
         this.name = Objects.requireNonNull(name, "name must not be null");
         this.upstreams = List.copyOf(Objects.requireNonNull(upstreams, "upstreams must not be null"));
         this.strategy = Objects.requireNonNull(strategy, "strategy must not be null");
+        this.unknownSelectable = unknownSelectable;
 
         initializeStrategyMetadata();
         rebuildSelectableCache();
@@ -59,8 +68,9 @@ public class UpstreamPool {
     /**
      * Returns the cached immutable snapshot of selectable upstreams.
      *
-     * UNKNOWN + HEALTHY are selectable.
-     * UNHEALTHY is excluded.
+     * HEALTHY is selectable.
+     * UNKNOWN is selectable when this pool is configured for optimistic startup.
+     * UNHEALTHY is always excluded.
      */
     public List<Upstream> getSelectableUpstreams() {
         return selectableUpstreams;
@@ -98,12 +108,20 @@ public class UpstreamPool {
         List<Upstream> result = new ArrayList<>();
 
         for (Upstream upstream : upstreams) {
-            if (upstream.isSelectable()) {
+            if (isSelectable(upstream)) {
                 result.add(upstream);
             }
         }
 
         selectableUpstreams = List.copyOf(result);
+    }
+
+    private boolean isSelectable(Upstream upstream) {
+        if (upstream.healthStatus() == HealthStatus.HEALTHY) {
+            return true;
+        }
+
+        return upstream.healthStatus() == HealthStatus.UNKNOWN && unknownSelectable;
     }
 
     /**

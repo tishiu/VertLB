@@ -26,6 +26,8 @@ USER_BACKEND_LOG=""
 ORDER_BACKEND_LOG=""
 SUMMARY_PATH=""
 DIRECT_SUMMARY_PATH=""
+AGGREGATE_PATH=""
+DIRECT_AGGREGATE_PATH=""
 CONFIG_PATH=""
 
 require_command() {
@@ -65,6 +67,123 @@ write_summary_header() {
   local summary_path="$1"
 
   printf 'timestamp,target,concurrency,run,duration,qps,avg_latency_ms,p95_latency_ms,p99_latency_ms,status\n' > "${summary_path}"
+}
+
+write_aggregate_summary() {
+  local summary_path="$1"
+  local aggregate_path="$2"
+
+  python3 - "${summary_path}" "${aggregate_path}" <<'PY'
+import csv
+import statistics
+import sys
+from collections import defaultdict
+
+summary_path, aggregate_path = sys.argv[1:3]
+fields = [
+    "target",
+    "concurrency",
+    "runs",
+    "qps_min",
+    "qps_max",
+    "qps_avg",
+    "qps_median",
+    "avg_latency_min_ms",
+    "avg_latency_max_ms",
+    "avg_latency_avg_ms",
+    "avg_latency_median_ms",
+    "status",
+]
+
+
+def parse_float(value):
+    if value is None or value == "":
+        return None
+
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
+
+def fmt(value):
+    if value is None:
+        return ""
+
+    return f"{value:.3f}"
+
+
+def aggregate(values, operation):
+    if not values:
+        return None
+
+    if operation == "min":
+        return min(values)
+
+    if operation == "max":
+        return max(values)
+
+    if operation == "avg":
+        return sum(values) / len(values)
+
+    if operation == "median":
+        return statistics.median(values)
+
+    raise ValueError(f"unknown aggregate operation: {operation}")
+
+
+with open(summary_path, "r", encoding="utf-8", newline="") as source:
+    rows = list(csv.DictReader(source))
+
+groups = defaultdict(list)
+for row in rows:
+    groups[(row.get("target", ""), row.get("concurrency", ""))].append(row)
+
+with open(aggregate_path, "w", encoding="utf-8", newline="") as output:
+    writer = csv.DictWriter(output, fieldnames=fields)
+    writer.writeheader()
+
+    for (target, concurrency), group_rows in sorted(groups.items()):
+        qps_values = []
+        latency_values = []
+        ok_runs = 0
+
+        for row in group_rows:
+            if row.get("status") == "ok":
+                ok_runs += 1
+
+            qps = parse_float(row.get("qps"))
+            avg_latency = parse_float(row.get("avg_latency_ms"))
+
+            if row.get("status") == "ok" and qps is not None:
+                qps_values.append(qps)
+
+            if row.get("status") == "ok" and avg_latency is not None:
+                latency_values.append(avg_latency)
+
+        run_count = len(group_rows)
+        if run_count == 0 or ok_runs == 0:
+            status = "failed"
+        elif ok_runs == run_count and len(qps_values) == run_count and len(latency_values) == run_count:
+            status = "ok"
+        else:
+            status = "partial"
+
+        writer.writerow({
+            "target": target,
+            "concurrency": concurrency,
+            "runs": str(run_count),
+            "qps_min": fmt(aggregate(qps_values, "min")),
+            "qps_max": fmt(aggregate(qps_values, "max")),
+            "qps_avg": fmt(aggregate(qps_values, "avg")),
+            "qps_median": fmt(aggregate(qps_values, "median")),
+            "avg_latency_min_ms": fmt(aggregate(latency_values, "min")),
+            "avg_latency_max_ms": fmt(aggregate(latency_values, "max")),
+            "avg_latency_avg_ms": fmt(aggregate(latency_values, "avg")),
+            "avg_latency_median_ms": fmt(aggregate(latency_values, "median")),
+            "status": status,
+        })
+PY
 }
 
 append_summary_row() {
@@ -171,6 +290,52 @@ for row in rows:
 PY
 }
 
+print_aggregate_table() {
+  local title="$1"
+  local aggregate_path="$2"
+
+  if [[ ! -f "${aggregate_path}" ]]; then
+    return 0
+  fi
+
+  echo
+  echo "${title}"
+  python3 - "${aggregate_path}" <<'PY'
+import csv
+import sys
+
+aggregate_path = sys.argv[1]
+columns = [
+    ("target", "target"),
+    ("concurrency", "concurrency"),
+    ("runs", "runs"),
+    ("qps_min", "qps_min"),
+    ("qps_max", "qps_max"),
+    ("qps_avg", "qps_avg"),
+    ("qps_median", "qps_median"),
+    ("avg_latency_min_ms", "avg_ms_min"),
+    ("avg_latency_max_ms", "avg_ms_max"),
+    ("avg_latency_avg_ms", "avg_ms_avg"),
+    ("avg_latency_median_ms", "avg_ms_median"),
+    ("status", "status"),
+]
+
+with open(aggregate_path, "r", encoding="utf-8", newline="") as source:
+    rows = list(csv.DictReader(source))
+
+widths = {
+    key: max(len(header), *(len(row.get(key, "")) for row in rows))
+    for key, header in columns
+}
+
+print(" | ".join(header.ljust(widths[key]) for key, header in columns))
+print(" | ".join("-" * widths[key] for key, _ in columns))
+
+for row in rows:
+    print(" | ".join(row.get(key, "").ljust(widths[key]) for key, _ in columns))
+PY
+}
+
 run_hey_logged() {
   local duration="$1"
   local concurrency="$2"
@@ -191,6 +356,8 @@ run_benchmark_suite() {
   local summary_path="$3"
   local warmup_log="$4"
   local run_log_prefix="$5"
+  local aggregate_path="$6"
+  local failed_runs=0
 
   write_summary_header "${summary_path}"
 
@@ -204,13 +371,20 @@ run_benchmark_suite() {
     echo "Benchmarking target=${target} concurrency=${BENCH_CONCURRENCY} run=${run}/${BENCH_RUNS} duration=${BENCH_DURATION}..."
     if ! run_hey_logged "${BENCH_DURATION}" "${BENCH_CONCURRENCY}" "${url}" "${run_log}"; then
       status="failed"
+      failed_runs=$((failed_runs + 1))
       append_summary_row "${summary_path}" "${target}" "${BENCH_CONCURRENCY}" "${run}" "${BENCH_DURATION}" "${run_log}" "${status}"
       echo "hey failed for ${target} run=${run}; see ${run_log}" >&2
-      return 1
+      continue
     fi
 
     append_summary_row "${summary_path}" "${target}" "${BENCH_CONCURRENCY}" "${run}" "${BENCH_DURATION}" "${run_log}" "${status}"
   done
+
+  write_aggregate_summary "${summary_path}" "${aggregate_path}"
+
+  if [[ "${failed_runs}" -eq "${BENCH_RUNS}" ]]; then
+    return 1
+  fi
 }
 
 dump_log() {
@@ -230,6 +404,8 @@ dump_logs() {
   dump_log "order backend log" "${ORDER_BACKEND_LOG}"
   dump_log "benchmark summary" "${SUMMARY_PATH}"
   dump_log "direct backend summary" "${DIRECT_SUMMARY_PATH}"
+  dump_log "benchmark aggregate" "${AGGREGATE_PATH}"
+  dump_log "direct backend aggregate" "${DIRECT_AGGREGATE_PATH}"
 }
 
 on_error() {
@@ -345,6 +521,8 @@ USER_BACKEND_LOG="${RUNTIME_DIR}/user-backend.log"
 ORDER_BACKEND_LOG="${RUNTIME_DIR}/order-backend.log"
 SUMMARY_PATH="${RUNTIME_DIR}/benchmark-summary.csv"
 DIRECT_SUMMARY_PATH="${RUNTIME_DIR}/direct-backend-summary.csv"
+AGGREGATE_PATH="${RUNTIME_DIR}/benchmark-aggregate.csv"
+DIRECT_AGGREGATE_PATH="${RUNTIME_DIR}/direct-backend-aggregate.csv"
 CONFIG_PATH="${RUNTIME_DIR}/gateway-routing.json"
 
 generate_config
@@ -379,7 +557,8 @@ run_benchmark_suite \
   "http://localhost:${GATEWAY_PORT}/api/users/1?debug=true" \
   "${SUMMARY_PATH}" \
   "${RUNTIME_DIR}/bench-gateway-c${BENCH_CONCURRENCY}-warmup.log" \
-  "bench-gateway-c${BENCH_CONCURRENCY}-run"
+  "bench-gateway-c${BENCH_CONCURRENCY}-run" \
+  "${AGGREGATE_PATH}"
 
 if [[ "${DIRECT_BACKEND_BASELINE}" == "true" ]]; then
   echo "Running direct backend baseline benchmarks..."
@@ -388,7 +567,8 @@ if [[ "${DIRECT_BACKEND_BASELINE}" == "true" ]]; then
     "http://localhost:${USER_BACKEND_PORT}/users/1?debug=true" \
     "${DIRECT_SUMMARY_PATH}" \
     "${RUNTIME_DIR}/bench-direct-c${BENCH_CONCURRENCY}-warmup.log" \
-    "bench-direct-c${BENCH_CONCURRENCY}-run"
+    "bench-direct-c${BENCH_CONCURRENCY}-run" \
+    "${DIRECT_AGGREGATE_PATH}"
 fi
 
 echo
@@ -399,7 +579,9 @@ echo "warmup_duration=${BENCH_WARMUP_DURATION}"
 echo "runs=${BENCH_RUNS}"
 
 print_summary_table "Gateway benchmark summary" "${SUMMARY_PATH}"
+print_aggregate_table "Gateway benchmark aggregate" "${AGGREGATE_PATH}"
 
 if [[ "${DIRECT_BACKEND_BASELINE}" == "true" ]]; then
   print_summary_table "Direct backend benchmark summary" "${DIRECT_SUMMARY_PATH}"
+  print_aggregate_table "Direct backend benchmark aggregate" "${DIRECT_AGGREGATE_PATH}"
 fi

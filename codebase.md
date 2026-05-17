@@ -13,8 +13,8 @@ The goal of this file is to capture the current analysis of the `VertiLB` codeba
   - Jackson for JSON config
   - SLF4J + Logback for logging
 - Current size:
-  - `35` source files in `src/main/java`
-  - `12` test files in `src/test/java`
+  - `37` source files in `src/main/java`
+  - `16` test files in `src/test/java`
 - There are `2` mock backend services in the smoke flow:
   - `user-service`
   - `order-service`
@@ -46,7 +46,7 @@ The codebase is split into clear modules:
 - `health`
   - `HealthChecker` probes upstreams periodically and updates health
 - `observability`
-  - `AppLogger`, `MetricsCollector`, `MetricsVerticle`
+  - `AppLogger`, `MetricsCollector`, `MetricsVerticle`, `PrometheusMetricsFormatter`
 
 Current request flow:
 
@@ -110,6 +110,8 @@ There are currently 4 strategies:
 ### Metrics
 
 - In-memory metrics
+- `GET /metrics` returns JSON
+- `GET /metrics/prometheus` returns Prometheus-compatible text
 - Current metric groups:
   - `totalRequests`
   - `requestsByPool`
@@ -147,6 +149,7 @@ Current defaulting/validation behavior includes:
 - `metrics.port` must not overlap a listener port
 - retry config is validated
 - health check config is validated
+- `healthCheck.unknownSelectable` defaults to `true`
 
 ## 5. Scripts And Tests
 
@@ -170,6 +173,7 @@ Current contents of `scripts/`:
   - starts VertiLB
   - waits for gateway and metrics readiness
   - runs `hey` benchmarks with warmup, repeated runs, and CSV output
+  - writes aggregate benchmark CSV files from repeated measured runs
   - supports an optional direct-backend baseline
 
 ### Current test coverage
@@ -183,16 +187,19 @@ There are tests for:
 - `HealthState`
 - `MetricsCollector`
 - `MetricsVerticle`
+- `PrometheusMetricsFormatter`
 - `UpstreamPool`
 - `StrategyFactory`
 - `RoundRobinStrategy`
 - `IpHashStrategy`
 - `LeastConnectionsStrategy`
+- main request-path integration via `GatewayRequestPathIntegrationTest`
 
 Assessment:
 
 - Test coverage is fairly good for config, routing, pool strategy, observability, and health.
-- There does not appear to be dedicated higher-level integration coverage for `CoreEngine` + `HttpProxy` + `ListenerVerticle` in the main request path.
+- Dedicated higher-level integration coverage now exists for `ListenerVerticle -> GatewayRouter -> CoreEngine -> UpstreamPool -> HttpProxy -> backend`.
+- Remaining integration gaps are mostly around failure modes, request bodies, multiple upstreams, and production-like metrics/health interactions.
 
 ## 6. Measured Stress Test Results
 
@@ -215,7 +222,8 @@ Relevant code state:
 - `UpstreamPool` selectable upstream caching has been applied.
 - `selectUpstream(ctx)` reads a cached `volatile List<Upstream>` snapshot.
 - Cache rebuild happens when `updateHealthStatus(...)` changes an upstream status.
-- Health semantics remain unchanged: `UNKNOWN` and `HEALTHY` are selectable, `UNHEALTHY` is excluded.
+- Default health semantics remain optimistic: `UNKNOWN` and `HEALTHY` are selectable, `UNHEALTHY` is excluded.
+- Strict startup can be enabled per pool with `healthCheck.unknownSelectable=false`.
 - No object pooling was added.
 
 Results:
@@ -375,6 +383,52 @@ timestamp,target,concurrency,run,duration,qps,avg_latency_ms,p95_latency_ms,p99_
 2026-05-17T11:28:36Z,direct-backend,1024,3,30s,832.0302,140.500,1015.100,3061.800,ok
 ```
 
+### Benchmark Summary Aggregation
+
+Date: `2026-05-17`
+
+Scope:
+
+- Only `scripts/bench-gateway.sh` was changed.
+- No Java code was changed.
+- No object pooling or performance refactor was added.
+
+Benchmark script behavior after this phase:
+
+- Per-run CSV output remains unchanged.
+- The script now writes aggregate CSV output after measured runs:
+  - gateway: `benchmark-aggregate.csv`
+  - direct backend: `direct-backend-aggregate.csv` when `DIRECT_BACKEND_BASELINE=true`
+- Aggregates are computed from measured runs only, not warmup.
+- Aggregate fields include:
+  - QPS min/max/avg/median
+  - average latency min/max/avg/median
+  - status: `ok`, `partial`, or `failed`
+- The script also prints a readable aggregate table to stdout.
+
+Aggregate CSV schema:
+
+```csv
+target,concurrency,runs,qps_min,qps_max,qps_avg,qps_median,avg_latency_min_ms,avg_latency_max_ms,avg_latency_avg_ms,avg_latency_median_ms,status
+```
+
+Short verification run with preserved artifacts:
+
+- Command: `BENCH_RUNS=2 BENCH_DURATION=3s BENCH_WARMUP_DURATION=1s KEEP_BENCH_LOGS=true ./scripts/bench-gateway.sh`
+- Artifact directory: `/tmp/tmp.MCYWgnLQQv`
+
+Sample aggregate row:
+
+```csv
+target,concurrency,runs,qps_min,qps_max,qps_avg,qps_median,avg_latency_min_ms,avg_latency_max_ms,avg_latency_avg_ms,avg_latency_median_ms,status
+gateway,1024,2,587.624,737.810,662.717,662.717,1162.800,1447.100,1304.950,1304.950,ok
+```
+
+Deviation:
+
+- The first sandboxed benchmark attempt failed because Gradle could not write its wrapper lock under `~/.gradle`.
+- The benchmark was rerun outside the sandbox with approval and completed successfully.
+
 ### Previous Local Run
 
 Results:
@@ -448,7 +502,7 @@ Meaning:
 
 ### 8.4 Health semantics are intentionally optimistic
 
-In the current implementation:
+By default:
 
 - `Upstream.isSelectable()` allows `UNKNOWN`
 - `UNKNOWN` and `HEALTHY` upstreams are selectable
@@ -460,18 +514,26 @@ This is optimistic startup behavior:
 - Cold start is smoother because traffic is not blocked while health status is still unknown.
 - Operators should understand that `UNKNOWN` means not yet proven healthy, not unavailable.
 
+Strict startup behavior is now opt-in per pool:
+
+- `healthCheck.unknownSelectable=false` excludes `UNKNOWN` upstreams.
+- In strict mode, only `HEALTHY` upstreams are selectable.
+- `UNHEALTHY` upstreams remain excluded in all modes.
+
 ### 8.5 Metrics are still basic in-memory snapshots
 
 - Simple and easy to use
 - Good enough for local and smoke environments
 - Not yet production-grade observability
+- Prometheus-compatible text output now exists at `/metrics/prometheus`
 
 Current limits:
 
 - latency samples are capped at `10,000`
-- no Prometheus format
 - no true histogram buckets
 - no persistence/export pipeline
+- no explicit Prometheus `HELP` / `TYPE` metadata yet
+- Prometheus latency metrics are summary values from in-memory samples, not histogram buckets
 
 ### 8.6 Benchmark discipline has improved, but interpretation is still early
 
@@ -484,6 +546,7 @@ Current limits:
   - repeated measured runs
   - raw per-run logs
   - machine-readable CSV summaries
+  - aggregate CSV summaries
   - optional direct-backend baseline comparison
 
 Meaning:
@@ -491,6 +554,7 @@ Meaning:
 - The benchmark harness is now good enough to avoid overreacting to a single local run.
 - Results should still be interpreted carefully because same-host JVM/backend/client benchmarks are noisy.
 - Future optimization work should compare repeated run distributions, not one QPS number.
+- Aggregate summaries make min/max/avg/median visible, but they still do not explain root cause by themselves.
 
 ## 9. Good Brainstorm Directions
 
@@ -505,21 +569,22 @@ Questions:
 
 Questions:
 
-- Should the project expose Prometheus-compatible metrics?
-- Should `latencySamples` be replaced with histogram buckets?
-- Should per-route metrics be added?
+- Should Prometheus output add `HELP` and `TYPE` metadata?
+- Should `latencySamples` be replaced with fixed histogram buckets?
+- Should per-route and per-method metrics be added?
+- Should metrics include retry attempt counts and upstream failure categories?
 
 ### Direction 3: Evolve health semantics
 
 Current decision:
 
-- `UNKNOWN` and `HEALTHY` upstreams are selectable
+- `UNKNOWN` and `HEALTHY` upstreams are selectable by default
 - `UNHEALTHY` upstreams are excluded
 - This is optimistic startup behavior
+- Strict startup mode exists with `healthCheck.unknownSelectable=false`
 
 Questions:
 
-- Should a strict startup mode be added later?
 - Is there a need for circuit breaking or outlier detection?
 
 ### Direction 4: Performance and scale
@@ -538,7 +603,8 @@ Questions:
   - multiple upstreams
   - multiple listeners
   - POST/body streaming
-- Should benchmark summaries compute median/min/max/stddev from repeated runs?
+- Should benchmark aggregate summaries add stddev and coefficient of variation?
+- Should benchmark runs collect CPU, heap, GC, and event-loop latency alongside QPS?
 
 ### Direction 5: Productization
 
@@ -552,11 +618,34 @@ Questions:
 
 Questions:
 
-- Should integration tests be added for `CoreEngine + HttpProxy + ListenerVerticle`?
+- Should integration tests be expanded for multi-upstream retry/failover?
+- Should integration tests cover request bodies and response streaming?
+- Should metrics and health behavior be tested together in an integration scenario?
 - Should there be a lightweight performance regression test?
-- Should the committed `scripts/bench-gateway.sh` compute aggregate statistics from repeated runs?
 
-## 10. Sample Prompt To Bring To ChatGPT
+## 10. Opinionated Notes And Pushback
+
+These are intentionally direct notes for brainstorming, not final decisions.
+
+1. Do not optimize object allocation yet.
+   The benchmark harness only recently became disciplined enough to show distributions. The next performance step should identify the bottleneck with evidence: direct backend comparison, CPU usage, GC, event-loop delay, and upstream latency.
+
+2. The Prometheus endpoint is useful, but it is not production observability yet.
+   It exposes text metrics, but latency is still derived from capped in-memory samples. Real production observability would likely need histogram buckets, route labels, method labels, retry labels, and stable metric metadata.
+
+3. The current integration test is valuable, but it covers the happy path plus one retry-exhaustion path.
+   It should not create false confidence about POST/body streaming, upstream disconnects, timeout behavior, multiple upstream failover, or health transition races.
+
+4. Strict health mode is a good operator control, but the default optimistic behavior can still surprise production users.
+   The right default depends on deployment style. Optimistic startup favors local/dev and fast cold starts; strict startup favors safety when upstream readiness matters.
+
+5. Adding product features now may dilute the core gateway.
+   Rate limiting, auth, circuit breaker, hedging, and canary routing are all plausible, but each one changes the gateway's operational contract. The near-term roadmap should prefer correctness, observability, test depth, and benchmark clarity first.
+
+6. `CoreEngine` is becoming the coordination center.
+   That is acceptable for now, but future features should be careful not to make it own policy details. RetryPolicy, health selection, routing, and proxying should remain separately testable boundaries.
+
+## 11. Sample Prompt To Bring To ChatGPT
 
 You can copy this prompt:
 
@@ -565,29 +654,31 @@ I have a Java/Vert.x codebase called VertiLB that acts as an API gateway and loa
 
 Current summary:
 - Architecture: ListenerVerticle -> GatewayRouter -> CoreEngine -> UpstreamPool -> BalancingStrategy -> HttpProxy -> Upstream
-- It has a health checker, in-memory metrics, and a metrics endpoint
+- It has a health checker, in-memory metrics, JSON metrics at /metrics, and Prometheus text metrics at /metrics/prometheus
 - JSON config includes listeners/routes/pools/upstreams/defaults/metrics/healthCheck
 - It already supports 4 balancing strategies: round-robin, random, ip-hash, least-connections
 - Performance Hardening Phase 1 added cached selectable upstream snapshots in UpstreamPool
 - Earlier local stress test reached ~944 QPS at 128 concurrent clients
 - Latest comparable local stress test after Phase 1 reached ~894 QPS at 128 concurrent clients with no errors
-- scripts/bench-gateway.sh now defaults to a single 1024-concurrency stress run, supports BENCH_CONCURRENCY overrides, writes CSV summaries and raw hey logs, and can run an optional direct-backend baseline
+- scripts/bench-gateway.sh now defaults to a single 1024-concurrency stress run, supports BENCH_CONCURRENCY overrides, writes per-run CSV summaries, aggregate CSV summaries, raw hey logs, and can run an optional direct-backend baseline
+- main request-path integration coverage now exists for ListenerVerticle -> GatewayRouter -> CoreEngine -> UpstreamPool -> HttpProxy -> mock backend
 
 Things I want to brainstorm:
 - logging.level is wired into AppLogger runtime filtering
-- health semantics are optimistic: UNKNOWN and HEALTHY are selectable, UNHEALTHY is excluded
-- current metrics are still basic
-- benchmark discipline now exists, but benchmark interpretation and next bottleneck analysis still need care
+- health semantics are optimistic by default: UNKNOWN and HEALTHY are selectable, UNHEALTHY is excluded; strict mode is opt-in with healthCheck.unknownSelectable=false
+- metrics now have JSON and Prometheus text outputs, but they are still backed by basic in-memory snapshots
+- benchmark discipline now includes repeated runs and aggregate summaries, but benchmark interpretation and next bottleneck analysis still need care
 
 Please help me:
 1. evaluate the current architecture
 2. identify 5-10 highest-value refactor or upgrade opportunities
 3. propose a short-term and medium-term roadmap
 4. propose how to interpret the new repeated benchmark summaries before choosing the next performance optimization
-5. if needed, propose better boundaries between CoreEngine / HttpProxy / RetryPolicy / Health subsystem
+5. challenge my assumptions and point out where I might be optimizing or productizing too early
+6. if needed, propose better boundaries between CoreEngine / HttpProxy / RetryPolicy / Health subsystem / Metrics subsystem
 ```
 
-## 11. Recent Execution Log
+## 12. Recent Execution Log
 
 ### 2026-05-17 - Performance Hardening Phase 1.5
 
@@ -668,7 +759,84 @@ Scope notes:
 - No object pooling was added.
 - No benchmark or performance optimization work was done in this phase.
 
-## 12. Short Conclusion
+### 2026-05-17 - Main Request Path Integration Tests
+
+Task completed:
+
+- Added `GatewayRequestPathIntegrationTest`.
+- Covered the real request path from listener through proxy to mock backend.
+- Verified route matching, prefix stripping, query preservation, unknown-route `404`, retry-exhausted `503`, and success metrics recording.
+
+Important command outcomes:
+
+- `./gradlew clean compileJava`: passed
+- `./gradlew test --tests '*GatewayRequestPathIntegrationTest'`: passed
+- `./gradlew clean test`: passed
+- `./scripts/smoke-gateway.sh`: passed
+- `git diff --check`: passed
+
+### 2026-05-17 - Prometheus Metrics Endpoint
+
+Task completed:
+
+- Added `PrometheusMetricsFormatter`.
+- Kept existing `/metrics` JSON behavior.
+- Added `/metrics/prometheus` as `text/plain; version=0.0.4`.
+- Added tests for formatter output, label escaping, JSON metrics response, and Prometheus metrics response.
+
+Important command outcomes:
+
+- `./gradlew clean compileJava`: passed
+- `./gradlew --no-daemon test --tests 'io.vertilb.observability.*'`: passed
+- `./gradlew clean test`: passed
+- `./scripts/smoke-gateway.sh`: passed
+- `git diff --check`: passed
+
+### 2026-05-17 - Strict Health Mode
+
+Task completed:
+
+- Added `healthCheck.unknownSelectable`, default `true`.
+- Wired `unknownSelectable=false` into `UpstreamPool` selection.
+- Preserved default optimistic behavior.
+- Updated `codebase.md` only for documentation.
+
+Important command outcomes:
+
+- `./gradlew clean compileJava`: passed
+- `./gradlew clean test`: passed
+- `./scripts/smoke-gateway.sh`: passed
+- `git diff --check`: passed
+
+### 2026-05-17 - Benchmark Summary Aggregation
+
+Task completed:
+
+- Updated `scripts/bench-gateway.sh`.
+- Added `benchmark-aggregate.csv`.
+- Added `direct-backend-aggregate.csv` when direct backend baseline is enabled.
+- Added readable aggregate table output.
+- Kept existing per-run CSV output unchanged.
+
+Important command outcomes:
+
+- `bash -n scripts/bench-gateway.sh`: passed
+- `./gradlew clean compileJava`: passed
+- `./gradlew clean test`: passed
+- `./scripts/smoke-gateway.sh`: passed
+- short `hey` benchmark with kept logs: passed after approved sandbox escalation
+- `git diff --check`: passed
+
+Artifact:
+
+- retained benchmark logs: `/tmp/tmp.MCYWgnLQQv`
+
+Deviation:
+
+- The first sandboxed benchmark attempt failed because Gradle could not write its wrapper lock under `~/.gradle`.
+- The command was rerun outside the sandbox with approval and completed successfully.
+
+## 13. Short Conclusion
 
 This is a relatively small codebase, but it already has a solid modular architecture and is easy to extend. The highest-value brainstorming areas right now are:
 

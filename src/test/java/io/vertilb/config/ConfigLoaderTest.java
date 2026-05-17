@@ -252,6 +252,29 @@ class ConfigLoaderTest {
     }
 
     @Test
+    void missingUnknownSelectableDefaultsToTrue() throws Exception {
+        String json = configWithHealthCheck("""
+              "enabled": true
+            """);
+
+        AppConfig config = ConfigLoader.load(writeConfig(json).toString());
+
+        assertEquals(true, config.pools.get(0).healthCheck.unknownSelectable);
+    }
+
+    @Test
+    void unknownSelectableFalseLoadsSuccessfully() throws Exception {
+        String json = configWithHealthCheck("""
+              "enabled": true,
+              "unknownSelectable": false
+            """);
+
+        AppConfig config = ConfigLoader.load(writeConfig(json).toString());
+
+        assertEquals(false, config.pools.get(0).healthCheck.unknownSelectable);
+    }
+
+    @Test
     void rejectsMetricsPortConflictWithListener() throws Exception {
         String json = validConfig().replace("\"port\": 9100", "\"port\": 8080");
 

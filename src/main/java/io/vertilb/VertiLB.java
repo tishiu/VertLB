@@ -95,13 +95,22 @@ public final class VertiLB {
             UpstreamPool pool = new UpstreamPool(
                 poolConfig.name,
                 upstreams,
-                strategy
+                strategy,
+                resolveUnknownSelectable(poolConfig)
             );
 
             pools.put(poolConfig.name, pool);
         }
 
         return pools;
+    }
+
+    private static boolean resolveUnknownSelectable(PoolConfig poolConfig) {
+        if (poolConfig.healthCheck == null || poolConfig.healthCheck.unknownSelectable == null) {
+            return true;
+        }
+
+        return poolConfig.healthCheck.unknownSelectable;
     }
 
     private static List<Upstream> buildUpstreams(List<UpstreamConfig> configs) {

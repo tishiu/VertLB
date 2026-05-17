@@ -199,7 +199,15 @@ public final class ConfigLoader {
     }
 
     private static void applyHealthCheckDefaults(HealthCheckConfig healthCheck) {
-        if (healthCheck == null || !Boolean.TRUE.equals(healthCheck.enabled)) {
+        if (healthCheck == null) {
+            return;
+        }
+
+        if (healthCheck.unknownSelectable == null) {
+            healthCheck.unknownSelectable = true;
+        }
+
+        if (!Boolean.TRUE.equals(healthCheck.enabled)) {
             return;
         }
 

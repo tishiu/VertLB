@@ -7,6 +7,7 @@ import java.util.List;
  */
 public class HealthCheckConfig {
     public Boolean enabled;
+    public Boolean unknownSelectable;
     public Long intervalMs;
     public Long timeoutMs;
     public String path;

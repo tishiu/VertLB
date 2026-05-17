@@ -175,6 +175,59 @@ class UpstreamPoolTest {
         assertEquals(unknown, pool.selectUpstream(null).orElseThrow());
     }
 
+    @Test
+    void strictModeExcludesUnknownUpstream() {
+        Upstream unknown = upstream("unknown");
+        UpstreamPool pool = new UpstreamPool("pool", List.of(unknown), new RoundRobinStrategy(), false);
+
+        assertTrue(pool.getSelectableUpstreams().isEmpty());
+        assertTrue(pool.selectUpstream(null).isEmpty());
+    }
+
+    @Test
+    void strictModeAllowsHealthyUpstream() {
+        Upstream healthy = upstream("healthy");
+        healthy.setHealthStatus(HealthStatus.HEALTHY);
+        UpstreamPool pool = new UpstreamPool("pool", List.of(healthy), new RoundRobinStrategy(), false);
+
+        assertEquals(List.of(healthy), pool.getSelectableUpstreams());
+        assertEquals(healthy, pool.selectUpstream(null).orElseThrow());
+    }
+
+    @Test
+    void strictModeReturnsEmptyWhenOnlyUnknownAndUnhealthyUpstreamsExist() {
+        Upstream unknown = upstream("unknown");
+        Upstream unhealthy = upstream("unhealthy");
+        unhealthy.setHealthStatus(HealthStatus.UNHEALTHY);
+        UpstreamPool pool = new UpstreamPool(
+            "pool",
+            List.of(unknown, unhealthy),
+            new RoundRobinStrategy(),
+            false
+        );
+
+        assertTrue(pool.getSelectableUpstreams().isEmpty());
+        assertTrue(pool.selectUpstream(null).isEmpty());
+    }
+
+    @Test
+    void updateHealthStatusRebuildsSelectableCacheInStrictMode() {
+        Upstream upstream = upstream("first");
+        UpstreamPool pool = new UpstreamPool("pool", List.of(upstream), new RoundRobinStrategy(), false);
+
+        assertTrue(pool.getSelectableUpstreams().isEmpty());
+
+        pool.updateHealthStatus("first", HealthStatus.HEALTHY);
+
+        assertEquals(List.of(upstream), pool.getSelectableUpstreams());
+        assertEquals(upstream, pool.selectUpstream(null).orElseThrow());
+
+        pool.updateHealthStatus("first", HealthStatus.UNKNOWN);
+
+        assertTrue(pool.getSelectableUpstreams().isEmpty());
+        assertTrue(pool.selectUpstream(null).isEmpty());
+    }
+
     private Upstream upstream(String id) {
         return new Upstream(id, "localhost", 8080, "http", 1, null);
     }

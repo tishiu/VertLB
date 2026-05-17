@@ -15,6 +15,7 @@ import io.vertx.core.json.JsonObject;
 public class MetricsVerticle extends AbstractVerticle {
     private final MetricsConfig config;
     private final MetricsCollector collector;
+    private final PrometheusMetricsFormatter prometheusFormatter = new PrometheusMetricsFormatter();
 
     public MetricsVerticle(MetricsConfig config, MetricsCollector collector) {
         this.config = config;
@@ -31,6 +32,7 @@ public class MetricsVerticle extends AbstractVerticle {
         String path = config.path == null || config.path.isBlank()
             ? "/metrics"
             : config.path;
+        String prometheusPath = prometheusPath(path);
 
         int port = config.port == null || config.port <= 0
             ? 9100
@@ -38,7 +40,7 @@ public class MetricsVerticle extends AbstractVerticle {
 
         vertx.createHttpServer()
             .requestHandler(request -> {
-                if (request.method() != HttpMethod.GET || !path.equals(request.path())) {
+                if (request.method() != HttpMethod.GET) {
                     request.response()
                         .setStatusCode(404)
                         .putHeader("Content-Type", "text/plain")
@@ -46,7 +48,25 @@ public class MetricsVerticle extends AbstractVerticle {
                     return;
                 }
 
-                JsonObject json = toJson(collector.snapshot());
+                MetricsCollector.MetricsSnapshot snapshot = collector.snapshot();
+
+                if (prometheusPath.equals(request.path())) {
+                    request.response()
+                        .setStatusCode(200)
+                        .putHeader("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+                        .end(prometheusFormatter.format(snapshot));
+                    return;
+                }
+
+                if (!path.equals(request.path())) {
+                    request.response()
+                        .setStatusCode(404)
+                        .putHeader("Content-Type", "text/plain")
+                        .end("Not Found");
+                    return;
+                }
+
+                JsonObject json = toJson(snapshot);
 
                 request.response()
                     .setStatusCode(200)
@@ -56,6 +76,16 @@ public class MetricsVerticle extends AbstractVerticle {
             .listen(port)
             .onSuccess(server -> startPromise.complete())
             .onFailure(startPromise::fail);
+    }
+
+    private String prometheusPath(String path) {
+        if ("/".equals(path)) {
+            return "/prometheus";
+        }
+
+        return path.endsWith("/")
+            ? path + "prometheus"
+            : path + "/prometheus";
     }
 
     private JsonObject toJson(MetricsCollector.MetricsSnapshot snapshot) {
