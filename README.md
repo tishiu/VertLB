@@ -120,9 +120,45 @@ VertiLB is configured around listeners, routes, pools, upstreams, health checks,
 ```bash
 ./gradlew clean test
 ./scripts/smoke-gateway.sh
+KEEP_PROFILE_LOGS=true ./scripts/profile-gateway.sh
 ```
 
 The smoke script starts mock backends, starts VertiLB, checks routed traffic, verifies retryable upstream status handling, and reads the metrics endpoint.
+
+The profiling script runs the existing gateway benchmark with GC logging and JFR recording enabled, preserves profiling artifacts by default, and writes benchmark CSV summaries alongside the JVM profiling output.
+
+## Profiling Harness
+
+Performance Profiling Phase 1 adds a standalone profiling harness at `scripts/profile-gateway.sh`.
+
+- purpose: capture evidence about allocation pressure and GC behavior before considering any object pool
+- scope: benchmark-only harness, no production Java code changes
+- target: `http://localhost:${GATEWAY_PORT}/api/users/1?debug=true`
+- defaults:
+  - `PROFILE_CONCURRENCY=1024`
+  - `PROFILE_DURATION=60s`
+  - `PROFILE_WARMUP_DURATION=10s`
+  - `PROFILE_RUNS=1`
+
+The harness starts mock backends, launches VertiLB with:
+
+- `-Xlog:gc*:file=${PROFILE_DIR}/gc.log:time,uptime,level,tags`
+- `-XX:StartFlightRecording=filename=${PROFILE_DIR}/vertilb.jfr,duration=${PROFILE_DURATION},settings=profile`
+
+Artifacts are written to a temporary profiling directory and kept by default. Set `DELETE_PROFILE_LOGS=true` if you explicitly want cleanup. The script writes:
+
+- `gc.log`
+- `vertilb.jfr`
+- `vertilb-runtime.log`
+- `user-backend.log`
+- `order-backend.log`
+- `hey-warmup.log`
+- `hey-run.log`
+- `benchmark-summary.csv`
+- `benchmark-aggregate.csv`
+- `gc-summary.txt` when simple pause parsing succeeds
+- `jfr-summary.txt` when the `jfr` CLI is available
+- `jfr-allocation-events.txt` when allocation event extraction is supported
 
 ## Stress Test Result
 

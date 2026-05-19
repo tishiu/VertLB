@@ -16,24 +16,18 @@ import io.vertilb.engine.error.ProxyException;
 import io.vertilb.engine.error.UpstreamTimeoutException;
 import io.vertilb.pool.Upstream;
 
+import java.util.Collections;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
+import java.util.TreeSet;
 
 /**
  * HTTP proxy component responsible for forwarding a request to a selected upstream
  * and streaming the response back to the client.
  */
 public class HttpProxy {
-    private static final Set<String> HOP_BY_HOP_HEADERS = Set.of(
-        "connection",
-        "keep-alive",
-        "transfer-encoding",
-        "te",
-        "trailer",
-        "upgrade",
-        "proxy-authorization",
-        "proxy-authenticate"
-    );
+    private static final Set<String> HOP_BY_HOP_HEADERS = createHopByHopHeaders();
 
     private final HttpClient httpClient;
     private final long requestTimeoutMs;
@@ -107,16 +101,15 @@ public class HttpProxy {
                                     HttpClientRequest outboundRequest) {
         MultiMap inboundHeaders = ctx.clientRequest.headers();
 
-        for (String name : inboundHeaders.names()) {
-            if (!isValidHeaderName(name) || isHopByHopHeader(name)) {
+        for (Map.Entry<String, String> header : inboundHeaders) {
+            String name = header.getKey();
+            String value = header.getValue();
+
+            if (!isValidHeaderName(name) || isHopByHopHeader(name) || value == null) {
                 continue;
             }
 
-            for (String value : inboundHeaders.getAll(name)) {
-                if (value != null) {
-                    outboundRequest.putHeader(name, value);
-                }
-            }
+            outboundRequest.putHeader(name, value);
         }
 
         outboundRequest.putHeader("Host", upstream.host() + ":" + upstream.port());
@@ -205,17 +198,17 @@ public class HttpProxy {
         }
 
         ctx.response().setStatusCode(upstreamResponse.statusCode());
+        MultiMap responseHeaders = upstreamResponse.headers();
 
-        for (String name : upstreamResponse.headers().names()) {
-            if (!isValidHeaderName(name) || isHopByHopHeader(name)) {
+        for (Map.Entry<String, String> header : responseHeaders) {
+            String name = header.getKey();
+            String value = header.getValue();
+
+            if (!isValidHeaderName(name) || isHopByHopHeader(name) || value == null) {
                 continue;
             }
 
-            for (String value : upstreamResponse.headers().getAll(name)) {
-                if (value != null) {
-                    ctx.response().putHeader(name, value);
-                }
-            }
+            ctx.response().putHeader(name, value);
         }
 
         return true;
@@ -235,8 +228,7 @@ public class HttpProxy {
     }
 
     private boolean isHopByHopHeader(String name) {
-        return name != null
-            && HOP_BY_HOP_HEADERS.contains(name.toLowerCase(Locale.ROOT));
+        return name != null && HOP_BY_HOP_HEADERS.contains(name);
     }
 
     private boolean isValidHeaderName(String name) {
@@ -265,5 +257,18 @@ public class HttpProxy {
         }
 
         return existing + ", " + remoteAddress.host();
+    }
+
+    private static Set<String> createHopByHopHeaders() {
+        TreeSet<String> headers = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
+        headers.add("connection");
+        headers.add("keep-alive");
+        headers.add("transfer-encoding");
+        headers.add("te");
+        headers.add("trailer");
+        headers.add("upgrade");
+        headers.add("proxy-authorization");
+        headers.add("proxy-authenticate");
+        return Collections.unmodifiableSet(headers);
     }
 }

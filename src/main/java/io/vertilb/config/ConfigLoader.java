@@ -88,6 +88,7 @@ public final class ConfigLoader {
         }
 
         applyMetricsDefaults(config.metrics);
+        applyPerformanceDefaults(config);
         applyListenerDefaults(config.listeners);
 
         if (config.routes != null) {
@@ -141,6 +142,24 @@ public final class ConfigLoader {
 
         if (metrics.path == null || metrics.path.isBlank()) {
             metrics.path = "/metrics";
+        }
+    }
+
+    private static void applyPerformanceDefaults(AppConfig config) {
+        if (config.performance == null) {
+            config.performance = new PerformanceConfig();
+        }
+
+        if (config.performance.requestContextPool == null) {
+            config.performance.requestContextPool = new RequestContextPoolConfig();
+        }
+
+        if (config.performance.requestContextPool.enabled == null) {
+            config.performance.requestContextPool.enabled = false;
+        }
+
+        if (config.performance.requestContextPool.maxSize == null) {
+            config.performance.requestContextPool.maxSize = 4096;
         }
     }
 
@@ -243,6 +262,7 @@ public final class ConfigLoader {
 
         validateRetry(config.defaults.retries);
         validateLogging(config.defaults.logging);
+        validatePerformance(config.performance);
 
         Set<Integer> listenerPorts = validateListeners(config.listeners);
         Set<String> poolNames = validatePools(config.pools);
@@ -450,6 +470,16 @@ public final class ConfigLoader {
 
         if (listenerPorts.contains(metrics.port)) {
             throw new IllegalArgumentException("Metrics port must not equal a listener port: " + metrics.port);
+        }
+    }
+
+    private static void validatePerformance(PerformanceConfig performance) {
+        if (performance == null || performance.requestContextPool == null) {
+            return;
+        }
+
+        if (performance.requestContextPool.maxSize == null || performance.requestContextPool.maxSize < 1) {
+            throw new IllegalArgumentException("requestContextPool maxSize must be >= 1");
         }
     }
 

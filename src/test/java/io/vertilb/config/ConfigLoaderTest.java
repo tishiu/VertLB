@@ -67,7 +67,68 @@ class ConfigLoaderTest {
         assertEquals("round-robin", config.pools.get(0).strategy);
         assertEquals("http", config.pools.get(0).upstreams.get(0).protocol);
         assertEquals(1, config.pools.get(0).upstreams.get(0).weight);
+        assertEquals(false, config.performance.requestContextPool.enabled);
+        assertEquals(4096, config.performance.requestContextPool.maxSize);
         assertEquals(1, config.routes.size());
+    }
+
+    @Test
+    void loadsEnabledRequestContextPoolConfiguration() throws Exception {
+        String json = validConfig().replace(
+            """
+              "metrics": {
+                "enabled": true,
+                "port": 9100,
+                "path": "/metrics"
+              }
+            """,
+            """
+              "metrics": {
+                "enabled": true,
+                "port": 9100,
+                "path": "/metrics"
+              },
+              "performance": {
+                "requestContextPool": {
+                  "enabled": true,
+                  "maxSize": 64
+                }
+              }
+            """
+        );
+
+        AppConfig config = ConfigLoader.load(writeConfig(json).toString());
+
+        assertEquals(true, config.performance.requestContextPool.enabled);
+        assertEquals(64, config.performance.requestContextPool.maxSize);
+    }
+
+    @Test
+    void rejectsInvalidRequestContextPoolMaxSize() throws Exception {
+        String json = validConfig().replace(
+            """
+              "metrics": {
+                "enabled": true,
+                "port": 9100,
+                "path": "/metrics"
+              }
+            """,
+            """
+              "metrics": {
+                "enabled": true,
+                "port": 9100,
+                "path": "/metrics"
+              },
+              "performance": {
+                "requestContextPool": {
+                  "enabled": true,
+                  "maxSize": 0
+                }
+              }
+            """
+        );
+
+        assertInvalid(json);
     }
 
     @Test

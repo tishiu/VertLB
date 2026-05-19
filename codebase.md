@@ -13,8 +13,10 @@ The goal of this file is to capture the current analysis of the `VertiLB` codeba
   - Jackson for JSON config
   - SLF4J + Logback for logging
 - Current size:
-  - `37` source files in `src/main/java`
-  - `16` test files in `src/test/java`
+  - `43` source files in `src/main/java`
+  - `19` test files in `src/test/java`
+- Repo guidance note:
+  - `CLAUDE.MD` has been deleted from the working tree and should no longer be treated as current local guidance.
 - There are `2` mock backend services in the smoke flow:
   - `user-service`
   - `order-service`
@@ -133,6 +135,7 @@ The JSON config includes these main sections:
 - `defaults`
 - `metrics`
 - `healthCheck`
+- `performance`
 
 `ConfigLoader` currently does 3 main things:
 
@@ -175,6 +178,17 @@ Current contents of `scripts/`:
   - runs `hey` benchmarks with warmup, repeated runs, and CSV output
   - writes aggregate benchmark CSV files from repeated measured runs
   - supports an optional direct-backend baseline
+- `profile-gateway.sh`
+  - compiles VertiLB as an install distribution
+  - starts the same mock user/order backends as the benchmark harness
+  - starts VertiLB with GC logging and JFR recording enabled
+  - runs a warmup and measured `hey` benchmark against the gateway route
+  - preserves profiling artifacts by default
+  - writes GC/JFR artifacts, benchmark CSVs, and `profile-summary.txt`
+  - can inject a temporary `performance.requestContextPool` override via `REQUEST_CONTEXT_POOL_ENABLED` and `REQUEST_CONTEXT_POOL_MAX_SIZE`
+- `test-profile-gateway.sh`
+  - shell-level contract check for `profile-gateway.sh`
+  - verifies key defaults, profiling flags, JFR allocation event extraction, GC summary, and CSV output references
 
 ### Current test coverage
 
@@ -182,7 +196,9 @@ There are tests for:
 
 - `ConfigLoader`
 - `RequestContext`
+- `RequestContextPool`
 - `GatewayRouter`
+- `ListenerVerticle`
 - `HealthChecker`
 - `HealthState`
 - `MetricsCollector`
@@ -428,6 +444,408 @@ Deviation:
 
 - The first sandboxed benchmark attempt failed because Gradle could not write its wrapper lock under `~/.gradle`.
 - The benchmark was rerun outside the sandbox with approval and completed successfully.
+
+### Performance Profiling Phase 1 - GC And Allocation Profiling Harness
+
+Date: `2026-05-18`
+
+Problem being investigated:
+
+- High request volume may create many short-lived objects.
+- Short-lived allocations may increase GC pressure.
+- GC pressure may affect latency and throughput.
+- The goal of this phase is evidence collection before considering any object pool.
+
+Scope:
+
+- `scripts/profile-gateway.sh` was added.
+- `scripts/test-profile-gateway.sh` was added as a shell contract check.
+- `README.md` was updated to document the profiling harness.
+- No production Java code was changed.
+- No object pooling was added.
+- `RequestContext` is still not pooled.
+- `CoreEngine`, `ListenerVerticle`, `RequestContext`, `HttpProxy`, `GatewayRouter`, `UpstreamPool`, `HealthChecker`, `MetricsCollector`, and `ConfigLoader` were not modified in this phase.
+
+Profiling script behavior:
+
+- Default load:
+  - `PROFILE_CONCURRENCY=1024`
+  - `PROFILE_DURATION=60s`
+  - `PROFILE_WARMUP_DURATION=10s`
+  - `PROFILE_RUNS=1`
+- Port defaults stay aligned with `bench-gateway.sh`:
+  - `GATEWAY_PORT=8080`
+  - `METRICS_PORT=9100`
+  - `USER_BACKEND_PORT=9001`
+  - `ORDER_BACKEND_PORT=9011`
+- Benchmark URL remains:
+  - `http://localhost:${GATEWAY_PORT}/api/users/1?debug=true`
+- Artifacts are written under `PROFILE_DIR="$(mktemp -d)"`.
+- Artifacts are kept by default and deleted only when `DELETE_PROFILE_LOGS=true`.
+- `PROFILE_DIR` is printed at the end of the run.
+
+VertiLB is launched through the generated install distribution script so JVM profiling flags apply to the VertiLB application process itself:
+
+```bash
+-Xlog:gc*:file=${PROFILE_DIR}/gc.log:time,uptime,level,tags
+-XX:StartFlightRecording=filename=${PROFILE_DIR}/vertilb.jfr,duration=${PROFILE_DURATION},settings=profile
+```
+
+Required artifacts:
+
+- `gc.log`
+- `vertilb.jfr`
+- `vertilb-runtime.log`
+- `user-backend.log`
+- `order-backend.log`
+- `hey-warmup.log`
+- `hey-run.log`
+- `benchmark-summary.csv`
+- `benchmark-aggregate.csv`
+- `profile-summary.txt`
+
+Optional artifacts when supported:
+
+- `jfr-summary.txt`
+- `jfr-allocation-events.txt`
+- `gc-summary.txt`
+
+Latest local profiling run:
+
+- Command: `KEEP_PROFILE_LOGS=true ./scripts/profile-gateway.sh`
+- Artifact directory: `/tmp/tmp.3EDvrXlUgt`
+- Result status: `ok`
+- QPS: `1282.4211`
+- Avg latency: `792.900 ms`
+- P95 latency: `983.000 ms`
+- P99 latency: `1073.800 ms`
+
+Latest GC summary:
+
+```text
+pause_count=60
+total_pause_ms=380.853
+max_pause_ms=19.333
+```
+
+Latest `profile-summary.txt` reported:
+
+```text
+gc_log=produced
+jfr=produced
+jfr_summary=produced
+jfr_allocation_events=produced
+benchmark_summary=produced
+benchmark_aggregate=produced
+```
+
+Verification commands run for the profiling phase:
+
+- `bash -n scripts/profile-gateway.sh`
+- `bash scripts/test-profile-gateway.sh`
+- `./gradlew clean compileJava`
+- `./gradlew clean test`
+- `./scripts/smoke-gateway.sh`
+- `KEEP_PROFILE_LOGS=true ./scripts/profile-gateway.sh`
+- `git diff --check`
+
+Verification notes:
+
+- `./gradlew clean compileJava` passed.
+- `./scripts/smoke-gateway.sh` passed.
+- `KEEP_PROFILE_LOGS=true ./scripts/profile-gateway.sh` passed.
+- `git diff --check` passed.
+- `./gradlew clean test` passed on a previous rerun, but the latest rerun failed in `GatewayRequestPathIntegrationTest.metricsAreRecordedAfterSuccessfulRequest` at the assertion that `requestsByPool` contains the pool name. This appears timing-sensitive because the same test passed in an earlier full-suite rerun without code changes.
+
+Deviation:
+
+- The profiling harness uses `./gradlew clean installDist` and then starts `build/install/vertilb/bin/vertilb` instead of `./gradlew run`. This is intentional so GC/JFR JVM options attach to the VertiLB process itself, not only to Gradle.
+
+### Performance Profiling Phase 3 - JFR Alignment With Measured Window
+
+Date: `2026-05-18`
+
+Problem being addressed:
+
+- The Phase 1 profiling harness recorded JFR from process start.
+- That included startup and warmup work and did not align cleanly with the measured benchmark window.
+- Phase 2 analysis concluded that better profiling alignment was needed before considering any optimization.
+
+Scope:
+
+- `scripts/profile-gateway.sh` was updated.
+- `scripts/test-profile-gateway.sh` was updated.
+- No production Java code was changed.
+- No object pooling was added.
+- `RequestContextPool` was not implemented.
+
+Profiling script behavior after Phase 3:
+
+- GC logging stays enabled from process start.
+- Preferred mode uses `jcmd` to control JFR against the running VertiLB PID.
+- Flow in aligned mode:
+  - start VertiLB with GC logging only
+  - wait for readiness
+  - run warmup
+  - start JFR with `jcmd`
+  - run measured benchmark
+  - stop JFR with `jcmd`
+- If `jcmd` is unavailable, the script falls back to startup-inclusive JFR using `-XX:StartFlightRecording`.
+
+Profile summary fields added or clarified:
+
+- `jfr_mode=aligned_jcmd` or `startup_fallback`
+- `jfr_start=after_warmup` or `process_start`
+- `profile_alignment=measured_window` or `startup_inclusive`
+- `benchmark_duration`
+- artifact production status for GC/JFR/CSV outputs
+
+Latest Phase 3 verification run:
+
+- Command: `KEEP_PROFILE_LOGS=true ./scripts/profile-gateway.sh`
+- Artifact directory: `/tmp/tmp.5ZqPgm5a1V`
+- JFR mode: `aligned_jcmd`
+- JFR start: `after_warmup`
+- Alignment: `measured_window`
+
+Latest benchmark result after alignment update:
+
+- QPS: `1393.5677`
+- Avg latency: `730.300 ms`
+- P95 latency: `1083.500 ms`
+- P99 latency: `1421.200 ms`
+- Status: `ok`
+
+Latest GC summary after alignment update:
+
+```text
+pause_count=55
+total_pause_ms=287.768
+max_pause_ms=17.159
+```
+
+Phase 3 verification commands run:
+
+- `bash -n scripts/profile-gateway.sh`
+- `bash scripts/test-profile-gateway.sh`
+- `./gradlew clean compileJava`
+- `./gradlew clean test`
+- `./scripts/smoke-gateway.sh`
+- `KEEP_PROFILE_LOGS=true ./scripts/profile-gateway.sh`
+- `git diff --check`
+
+Verification notes:
+
+- all commands above passed in the latest verification run
+- the latest `profile-summary.txt` confirmed aligned JFR capture around the measured benchmark window
+
+### Performance Optimization Phase 2 - HttpProxy Header Handling Allocation Reduction
+
+Date: `2026-05-18`
+
+Problem being addressed:
+
+- Earlier profiling did not justify `RequestContextPool`.
+- Sampled allocation hotspots pointed more toward header maps, strings, arrays, and `HttpProxy.isHopByHopHeader`.
+- This phase targets only `HttpProxy` header handling internals without changing proxy behavior.
+
+Scope:
+
+- `src/main/java/io/vertilb/proxy/HttpProxy.java` was updated.
+- `src/test/java/io/vertilb/proxy/HttpProxyTest.java` was added.
+- No production Java code outside `HttpProxy` was changed.
+- No object pooling was added.
+- `CoreEngine`, `RequestContext`, `GatewayRouter`, `UpstreamPool`, `RetryPolicy`, and `MetricsCollector` were not modified.
+
+Implementation changes in `HttpProxy`:
+
+- Hop-by-hop header names now live in one static immutable case-insensitive set.
+- Per-header `toLowerCase(Locale.ROOT)` allocation was removed from `isHopByHopHeader`.
+- Request header copy now iterates `MultiMap` entries directly instead of `names()` plus `getAll(name)`.
+- Response header copy now iterates `MultiMap` entries directly instead of `names()` plus `getAll(name)`.
+- Null header values are still ignored.
+- Hop-by-hop header filtering semantics are unchanged.
+
+Behavior preserved by focused tests:
+
+- hop-by-hop request headers are not forwarded
+- normal request headers are forwarded
+- hop-by-hop response headers are not copied downstream
+- retry-candidate upstream statuses still defer response handling to the caller
+
+Verification commands run:
+
+- `./gradlew test --tests io.vertilb.proxy.HttpProxyTest`
+- `./gradlew test --tests io.vertilb.integration.GatewayRequestPathIntegrationTest`
+- `./gradlew clean compileJava`
+- `./gradlew clean test`
+- `./scripts/smoke-gateway.sh`
+- `KEEP_PROFILE_LOGS=true ./scripts/profile-gateway.sh`
+- `git diff --check`
+
+All commands above passed in the latest verification run.
+
+Latest profile after the `HttpProxy` header-handling change:
+
+- Artifact directory: `/tmp/tmp.rcF9gH2S7L`
+- JFR mode: `aligned_jcmd`
+- Benchmark row:
+  - QPS: `978.2508`
+  - Avg latency: `1039.900 ms`
+  - P95: `1469.100 ms`
+  - P99: `1917.900 ms`
+- GC summary:
+
+```text
+pause_count=42
+total_pause_ms=294.711
+max_pause_ms=25.294
+```
+
+Sampled allocation signal comparison versus the previous aligned profiling run at `/tmp/tmp.5ZqPgm5a1V`:
+
+- `io.vertilb.proxy.HttpProxy.isHopByHopHeader`
+  - before: `48` samples, about `25.9 MiB`
+  - after: `0` samples, `0 B`
+- `io.vertilb.proxy.HttpProxy.copyRequestHeaders`
+  - before: `13` samples, about `6.5 MiB`
+  - after: `8` samples, about `4.5 MiB`
+- `io.vertx.core.http.impl.headers.HeadersMultiMap$MapEntry`
+  - before: `108` samples, about `56.6 MiB`
+  - after: `80` samples, about `43.9 MiB`
+- `io.netty.handler.codec.DefaultHeaders$HeaderEntry`
+  - before: `114` samples, about `61.9 MiB`
+  - after: `61` samples, about `28.2 MiB`
+
+Interpretation:
+
+- The local allocation signal around `HttpProxy` header filtering improved.
+- The `isHopByHopHeader` hotspot seen in the previous aligned profile disappeared in this run.
+- Header-entry sample weights also decreased.
+- Throughput and latency in this one same-host run should not be treated as a clean regression or improvement signal, because local benchmark noise is still significant.
+
+### Performance Optimization Phase 3 - Experimental RequestContextPool
+
+Date: `2026-05-18`
+
+Problem being addressed:
+
+- The original optimization concern was request-scoped allocation and GC pressure.
+- Earlier profiling did not justify `RequestContextPool` as a proven hotspot fix.
+- This phase implements `RequestContextPool` only as an experiment, gated by config and defaulting to OFF.
+
+Scope:
+
+- Added `src/main/java/io/vertilb/config/PerformanceConfig.java`
+- Added `src/main/java/io/vertilb/config/RequestContextPoolConfig.java`
+- Added `src/main/java/io/vertilb/engine/RequestContextPool.java`
+- Added `src/main/java/io/vertilb/engine/RequestContextFactory.java`
+- Added `src/main/java/io/vertilb/engine/AllocatingRequestContextFactory.java`
+- Added `src/main/java/io/vertilb/engine/PooledRequestContextFactory.java`
+- Updated `AppConfig`, `ConfigLoader`, `RequestContext`, `ListenerVerticle`, `VertiLB`, and `profile-gateway.sh`
+- Added focused tests for `RequestContextPool` and `ListenerVerticle`
+
+Config shape:
+
+```json
+{
+  "performance": {
+    "requestContextPool": {
+      "enabled": false,
+      "maxSize": 4096
+    }
+  }
+}
+```
+
+Implementation details:
+
+- `performance.requestContextPool.enabled` defaults to `false`
+- `performance.requestContextPool.maxSize` defaults to `4096`
+- `ConfigLoader` validates `maxSize >= 1`
+- `RequestContext` now supports `init(...)` and `reset()` so one instance can be reused safely
+- `reset()` clears request-scoped references and primitive state, including `clientRequest`, `rewrittenUri`, `selectedUpstreamId`, `responseStatusCode`, `durationMs`, and `lastError`
+- `outboundUri()` now fails clearly with `IllegalStateException` if used after reset without re-init
+- `ListenerVerticle` uses an allocating factory when pooling is disabled
+- `ListenerVerticle` uses a per-verticle `RequestContextPool` through `PooledRequestContextFactory` when pooling is enabled
+- `RequestContext` is released only in the `engine.handleRequest(ctx).onComplete(...)` path, never before the async request lifecycle finishes
+
+Focused test coverage:
+
+- missing `performance.requestContextPool` defaults correctly
+- `enabled=true` loads correctly
+- invalid `maxSize <= 0` is rejected
+- `RequestContext.reset()` clears previous state
+- reused `RequestContext` does not leak `rewrittenUri`, response status, or `lastError`
+- `RequestContextPool` reuses instances, respects `maxSize`, ignores null release, and updates stats
+- pooled listener path does not release the context before async completion and does release it afterward
+
+Verification commands run:
+
+- `bash -n scripts/profile-gateway.sh`
+- `bash scripts/test-profile-gateway.sh`
+- `./gradlew clean compileJava`
+- `./gradlew clean test`
+- `./scripts/smoke-gateway.sh`
+- `KEEP_PROFILE_LOGS=true ./scripts/profile-gateway.sh`
+- `REQUEST_CONTEXT_POOL_ENABLED=true REQUEST_CONTEXT_POOL_MAX_SIZE=4096 KEEP_PROFILE_LOGS=true ./scripts/profile-gateway.sh`
+- `git diff --check`
+
+All commands above passed in the latest verification run.
+
+Profile comparison:
+
+- Pool OFF artifact directory: `/tmp/tmp.Qp538e4f64`
+- Pool ON artifact directory: `/tmp/tmp.qM3d4AT6ZR`
+- Both runs used `jfr_mode=aligned_jcmd` and `profile_alignment=measured_window`
+
+Benchmark comparison:
+
+- Pool OFF
+  - QPS: `1302.1833`
+  - Avg latency: `780.700 ms`
+  - P95: `1133.400 ms`
+  - P99: `1448.400 ms`
+- Pool ON
+  - QPS: `994.6688`
+  - Avg latency: `1020.800 ms`
+  - P95: `1534.500 ms`
+  - P99: `1905.300 ms`
+
+GC comparison:
+
+- Pool OFF
+
+```text
+pause_count=50
+total_pause_ms=303.215
+max_pause_ms=22.564
+```
+
+- Pool ON
+
+```text
+pause_count=69
+total_pause_ms=479.365
+max_pause_ms=25.634
+```
+
+JFR allocation comparison for `RequestContext` using `jdk.ObjectAllocationSample`:
+
+- Pool OFF
+  - `9` samples
+  - `5,606,298` sampled bytes, about `5.35 MiB`
+  - about `0.34%` of total sampled allocation weight in the run
+- Pool ON
+  - `0` samples
+  - `0 B`
+
+Interpretation:
+
+- The experimental pool removed the sampled `RequestContext` allocation signal as expected.
+- That change did not translate into better benchmark or GC results in this single same-host run.
+- The experiment therefore does not justify enabling `RequestContextPool` by default.
+- `RequestContextPool` should remain OFF unless future repeated profiling shows a consistent end-to-end improvement.
 
 ### Previous Local Run
 

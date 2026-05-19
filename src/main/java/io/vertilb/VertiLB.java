@@ -10,10 +10,15 @@ import io.vertilb.config.AppConfig;
 import io.vertilb.config.ConfigLoader;
 import io.vertilb.config.HealthCheckConfig;
 import io.vertilb.config.ListenerConfig;
+import io.vertilb.config.RequestContextPoolConfig;
 import io.vertilb.config.PoolConfig;
 import io.vertilb.config.RetryConfig;
 import io.vertilb.config.UpstreamConfig;
+import io.vertilb.engine.AllocatingRequestContextFactory;
 import io.vertilb.engine.CoreEngine;
+import io.vertilb.engine.PooledRequestContextFactory;
+import io.vertilb.engine.RequestContextFactory;
+import io.vertilb.engine.RequestContextPool;
 import io.vertilb.engine.RetryPolicy;
 import io.vertilb.gateway.GatewayRouter;
 import io.vertilb.health.HealthChecker;
@@ -75,7 +80,7 @@ public final class VertiLB {
             vertx
         );
 
-        deployListeners(vertx, config.listeners, router, engine);
+        deployListeners(vertx, config, config.listeners, router, engine);
         deployHealthCheckers(vertx, config, pools, logger, metrics);
         deployMetricsVerticle(vertx, config, metrics);
 
@@ -133,11 +138,14 @@ public final class VertiLB {
     }
 
     private static void deployListeners(Vertx vertx,
+                                        AppConfig config,
                                         List<ListenerConfig> listeners,
                                         GatewayRouter router,
                                         CoreEngine engine) {
         for (ListenerConfig listener : listeners) {
-            vertx.deployVerticle(new ListenerVerticle(listener, router, engine))
+            RequestContextFactory contextFactory = createRequestContextFactory(config);
+
+            vertx.deployVerticle(new ListenerVerticle(listener, router, engine, contextFactory))
                 .onSuccess(id -> System.out.println(
                     "Listener deployed on " + listener.host + ":" + listener.port + " deploymentId=" + id
                 ))
@@ -147,6 +155,16 @@ public final class VertiLB {
                     error.printStackTrace();
                 });
         }
+    }
+
+    private static RequestContextFactory createRequestContextFactory(AppConfig config) {
+        RequestContextPoolConfig poolConfig = config.performance.requestContextPool;
+
+        if (!Boolean.TRUE.equals(poolConfig.enabled)) {
+            return new AllocatingRequestContextFactory();
+        }
+
+        return new PooledRequestContextFactory(new RequestContextPool(poolConfig.maxSize));
     }
 
     private static void deployHealthCheckers(Vertx vertx,

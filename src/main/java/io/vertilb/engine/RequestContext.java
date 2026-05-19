@@ -8,9 +8,9 @@ import io.vertx.core.http.HttpServerResponse;
  * through upstream selection, retry, forwarding, and observability.
  */
 public class RequestContext {
-    public final String poolName;
-    public final HttpServerRequest clientRequest;
-    public final long startTime;
+    public String poolName;
+    public HttpServerRequest clientRequest;
+    public long startTime;
 
     public String rewrittenUri;
     public String selectedUpstreamId;
@@ -23,9 +23,7 @@ public class RequestContext {
      * Creates an empty request context for framework and test construction.
      */
     public RequestContext() {
-        this.poolName = null;
-        this.clientRequest = null;
-        this.startTime = System.currentTimeMillis();
+        reset();
     }
 
     /**
@@ -35,9 +33,32 @@ public class RequestContext {
      * @param clientRequest incoming Vert.x request
      */
     public RequestContext(String poolName, HttpServerRequest clientRequest) {
+        init(poolName, clientRequest, null);
+    }
+
+    public RequestContext init(String poolName, HttpServerRequest clientRequest, String rewrittenUri) {
         this.poolName = poolName;
         this.clientRequest = clientRequest;
+        this.rewrittenUri = rewrittenUri;
+        this.selectedUpstreamId = null;
+        this.attemptCount = 0;
+        this.responseStatusCode = 0;
+        this.durationMs = 0L;
+        this.lastError = null;
         this.startTime = System.currentTimeMillis();
+        return this;
+    }
+
+    public void reset() {
+        this.poolName = null;
+        this.clientRequest = null;
+        this.rewrittenUri = null;
+        this.selectedUpstreamId = null;
+        this.attemptCount = 0;
+        this.responseStatusCode = 0;
+        this.durationMs = 0L;
+        this.lastError = null;
+        this.startTime = 0L;
     }
 
     public HttpServerResponse response() {
@@ -45,6 +66,10 @@ public class RequestContext {
     }
 
     public String outboundUri() {
+        if (clientRequest == null) {
+            throw new IllegalStateException("RequestContext is not initialized");
+        }
+
         return rewrittenUri != null ? rewrittenUri : clientRequest.uri();
     }
 }

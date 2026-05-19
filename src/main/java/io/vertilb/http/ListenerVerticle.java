@@ -3,8 +3,10 @@ package io.vertilb.http;
 import io.vertx.core.AbstractVerticle;
 import io.vertx.core.Promise;
 import io.vertilb.config.ListenerConfig;
+import io.vertilb.engine.AllocatingRequestContextFactory;
 import io.vertilb.engine.CoreEngine;
 import io.vertilb.engine.RequestContext;
+import io.vertilb.engine.RequestContextFactory;
 import io.vertilb.gateway.GatewayRouter;
 import io.vertilb.gateway.RouteDecision;
 
@@ -16,11 +18,20 @@ public class ListenerVerticle extends AbstractVerticle {
     private final ListenerConfig config;
     private final GatewayRouter router;
     private final CoreEngine engine;
+    private final RequestContextFactory requestContextFactory;
 
     public ListenerVerticle(ListenerConfig config, GatewayRouter router, CoreEngine engine) {
+        this(config, router, engine, new AllocatingRequestContextFactory());
+    }
+
+    public ListenerVerticle(ListenerConfig config,
+                            GatewayRouter router,
+                            CoreEngine engine,
+                            RequestContextFactory requestContextFactory) {
         this.config = config;
         this.router = router;
         this.engine = engine;
+        this.requestContextFactory = requestContextFactory;
     }
 
     @Override
@@ -45,8 +56,11 @@ public class ListenerVerticle extends AbstractVerticle {
                     return;
                 }
 
-                RequestContext ctx = new RequestContext(decision.poolName(), request);
-                ctx.rewrittenUri = decision.rewrittenUri();
+                RequestContext ctx = requestContextFactory.create(
+                    decision.poolName(),
+                    request,
+                    decision.rewrittenUri()
+                );
 
                 engine.handleRequest(ctx)
                     .onFailure(error -> {
@@ -56,6 +70,9 @@ public class ListenerVerticle extends AbstractVerticle {
                                 .putHeader("Content-Type", "text/plain")
                                 .end("Bad Gateway");
                         }
+                    })
+                    .onComplete(ignored -> {
+                        requestContextFactory.release(ctx);
                     });
             })
             .listen(config.port, host)

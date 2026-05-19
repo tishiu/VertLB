@@ -12,4 +12,5 @@ public class AppConfig {
     public List<PoolConfig> pools;
     public DefaultsConfig defaults;
     public MetricsConfig metrics;
+    public PerformanceConfig performance;
 }
